@@ -1,56 +1,317 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>midnightbandy — case studies</title>
-  <meta name="description" content="What's actually being built, in plain terms — real products, real architecture decisions, real state.">
-  <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>◆</text></svg>">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>midnightbandy</title>
+<meta name="description" content="the handler is here.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2250%22 y=%2268%22 font-size=%2260%22 text-anchor=%22middle%22 fill=%22%2300f0ff%22>☾</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; display: block; }
+  #field { z-index: 1; }
+  #vignette {
+    z-index: 2;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,0.55) 100%);
+  }
+  #scanlines {
+    z-index: 3;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.12) 0px, rgba(0,0,0,0.12) 1px, transparent 1px, transparent 3px);
+    mix-blend-mode: overlay;
+    opacity: 0.5;
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #7effe0;
+    text-shadow: 0 0 8px rgba(0,240,255,0.5);
+    user-select: none;
+    pointer-events: none;
+  }
+
+  #boot {
+    position: fixed; inset: 0; z-index: 10;
+    background: #000;
+    color: #00f0ff;
+    font-size: 14px;
+    line-height: 1.7;
+    padding: 40px;
+    white-space: pre-wrap;
+    text-shadow: 0 0 6px rgba(0,240,255,0.6);
+  }
+  #boot .cursor { animation: blink 0.9s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .wordmark {
+    top: 32px; left: 32px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: clamp(22px, 4vw, 38px);
+    letter-spacing: -0.02em;
+  }
+  .wordmark span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+
+  .tagline {
+    top: 78px; left: 33px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #6c7a8a;
+    text-shadow: none;
+  }
+
+  .clock {
+    top: 32px; right: 32px;
+    text-align: right;
+    font-size: clamp(28px, 5vw, 48px);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .clock .msc { font-size: 0.4em; color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); vertical-align: super; }
+
+  .meta {
+    bottom: 28px; left: 32px;
+    font-size: 11px;
+    color: #4d5a6a;
+    max-width: 62ch;
+    line-height: 1.6;
+  }
+  .meta a { color: #7effe0; text-decoration: none; pointer-events: auto; }
+  .meta a:hover { text-decoration: underline; }
+
+  .hint {
+    bottom: 28px; right: 32px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #4d5a6a;
+    text-align: right;
+  }
+
+  @media (max-width: 620px) {
+    .tagline, .meta { max-width: 80vw; }
+    .hint { display: none; }
+  }
+</style>
 </head>
 <body>
-  <header class="site">
-    <div class="wrap">
-      <div class="brand">midnightbandy</div>
-      <nav class="site">
-        <a href="https://github.com/midnightbandy" target="_blank" rel="noreferrer">GitHub</a>
-      </nav>
-    </div>
-  </header>
 
-  <main class="wrap">
-    <h1>What's actually being built.</h1>
-    <p class="tagline">Three real products, at three different stages, described honestly — what's shipped, what's still open, and the specific decisions that shaped each one. Not a highlight reel.</p>
+<div id="boot"></div>
 
-    <div class="eyebrow">Case studies</div>
-    <div class="project-grid">
+<canvas id="field"></canvas>
+<div id="vignette" class="hud" style="position:fixed;inset:0;"></div>
+<div id="scanlines" class="hud" style="position:fixed;inset:0;"></div>
 
-      <a class="card" href="flock.html">
-        <div class="status">In development</div>
-        <h2>Flock</h2>
-        <p>Trust infrastructure for real-world hangouts — a computed reputation score, a carry-commitment system, and a hard rule against ever holding a third-party OAuth token.</p>
-        <div class="stack"><span>Next.js 16</span><span>Supabase</span><span>Real-time</span></div>
-      </a>
+<div class="hud wordmark">midnight<span>bandy</span></div>
+<div class="hud tagline">the handler is here — not a portfolio, a signal</div>
+<div class="hud clock" id="clock">00:00<span class="msc">00</span></div>
+<div class="meta hud">
+  Generative flow field, hand-rolled value noise, no libraries.
+  Click to reseed. Move to disturb it.
+  <br>Source: <a href="https://github.com/midnightbandy/midnightbandy.github.io">this repo</a> · Everything else this account touches: <a href="https://github.com/midnightbandy">github.com/midnightbandy</a>
+</div>
+<div class="hud hint">click = reseed<br>move = disturb</div>
 
-      <a class="card" href="zippg.html">
-        <div class="status">In development</div>
-        <h2>ZipPG</h2>
-        <p>A verified search engine for PGs and co-living in Pune — owner-KYC and photo-verification before a listing goes live, and a trust score a scraper-based competitor can't replicate.</p>
-        <div class="stack"><span>Next.js</span><span>Postgres · Neon</span><span>Prisma</span></div>
-      </a>
+<script>
+// ---------- boot sequence ----------
+const bootLines = [
+  "connecting to midnightbandy...",
+  "handler online.",
+  "no portfolio today. field generator instead.",
+  "particles: spinning up",
+  "noise field: seeded",
+  "> ready.",
+];
+const bootEl = document.getElementById("boot");
+let bootIdx = 0, charIdx = 0;
+function typeBoot() {
+  if (bootIdx >= bootLines.length) {
+    setTimeout(() => {
+      bootEl.style.transition = "opacity 0.6s ease";
+      bootEl.style.opacity = "0";
+      setTimeout(() => bootEl.remove(), 650);
+    }, 400);
+    return;
+  }
+  const line = bootLines[bootIdx];
+  bootEl.textContent = bootLines.slice(0, bootIdx).join("\n") + (bootIdx > 0 ? "\n" : "") + line.slice(0, charIdx);
+  bootEl.innerHTML += '<span class="cursor">▋</span>';
+  charIdx++;
+  if (charIdx > line.length) { bootIdx++; charIdx = 0; setTimeout(typeBoot, 120); }
+  else setTimeout(typeBoot, 18);
+}
+typeBoot();
 
-      <a class="card" href="infra-estimator.html">
-        <div class="status">Open source</div>
-        <h2>Infra Estimator</h2>
-        <p>An offline-first estimation platform for India's infrastructure tendering ecosystem, where every cited rate is checksum-verified against the actual government source document — not just referenced.</p>
-        <div class="stack"><span>Vite · React · TS</span><span>IndexedDB</span><span>Python pipeline</span></div>
-      </a>
+// ---------- clock ----------
+function tick() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, "0");
+  const m = String(now.getMinutes()).padStart(2, "0");
+  const s = String(now.getSeconds()).padStart(2, "0");
+  document.getElementById("clock").innerHTML = `${h}:${m}<span class="msc">${s}</span>`;
+}
+tick();
+setInterval(tick, 1000);
 
-    </div>
-  </main>
+// ---------- value noise (hand-rolled, no deps) ----------
+const PERM_SIZE = 256;
+let perm = [];
+function seedNoise() {
+  const p = [...Array(PERM_SIZE).keys()];
+  for (let i = PERM_SIZE - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [p[i], p[j]] = [p[j], p[i]];
+  }
+  perm = p.concat(p);
+}
+seedNoise();
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(a, b, t) { return a + t * (b - a); }
+function grad(hash, x, y) {
+  // Classic 4-gradient 2D Perlin gradient selection — deliberately the
+  // well-established version, not a clever reinvention, after a first draft
+  // here used ad-hoc bit-twiddling that wasn't verified to produce a smooth,
+  // unbiased field.
+  switch (hash & 3) {
+    case 0: return  x + y;
+    case 1: return -x + y;
+    case 2: return  x - y;
+    default: return -x - y;
+  }
+}
+function noise2D(x, y) {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  const xf = x - Math.floor(x), yf = y - Math.floor(y);
+  const u = fade(xf), v = fade(yf);
+  const aa = perm[perm[X] + Y], ab = perm[perm[X] + Y + 1];
+  const ba = perm[perm[X + 1] + Y], bb = perm[perm[X + 1] + Y + 1];
+  const x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1, yf), u);
+  const x2 = lerp(grad(ab, xf, yf - 1), grad(bb, xf - 1, yf - 1), u);
+  return (lerp(x1, x2, v) + 1) / 2; // 0..1
+}
 
-  <footer class="site">
-    <div class="wrap">Built and maintained by midnightbandy. Source for this site: <a href="https://github.com/midnightbandy/midnightbandy.github.io">github.com/midnightbandy/midnightbandy.github.io</a></div>
-  </footer>
+// ---------- flow field particle system ----------
+const canvas = document.getElementById("field");
+const ctx = canvas.getContext("2d");
+let W, H, DPR;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+}
+resize();
+window.addEventListener("resize", resize);
+
+const isSmall = Math.min(window.innerWidth, window.innerHeight) < 640;
+const PARTICLE_COUNT = isSmall ? 900 : 2200;
+const NOISE_SCALE = 0.0016;
+const TIME_SCALE = 0.00012;
+const SPEED = isSmall ? 1.1 : 1.4;
+
+const PALETTE = [
+  [0, 240, 255],   // cyan
+  [255, 46, 209],  // magenta
+  [130, 90, 255],  // violet
+  [80, 255, 190],  // mint
+];
+
+class Particle {
+  constructor() { this.reset(); }
+  reset() {
+    this.x = Math.random() * W;
+    this.y = Math.random() * H;
+    this.life = 0;
+    this.maxLife = 120 + Math.random() * 260;
+    const c = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+    this.color = c;
+  }
+  step(t, mouse) {
+    let angle = noise2D(this.x * NOISE_SCALE, this.y * NOISE_SCALE + t) * Math.PI * 4;
+
+    if (mouse.active) {
+      const dx = this.x - mouse.x, dy = this.y - mouse.y;
+      const d2 = dx * dx + dy * dy;
+      const R = 220;
+      if (d2 < R * R) {
+        const d = Math.sqrt(d2) || 1;
+        const push = (1 - d / R) * 2.2;
+        angle = Math.atan2(dy / d, dx / d) + Math.sin(t * 40) * 0.3;
+        this.x += Math.cos(angle) * push * 4;
+        this.y += Math.sin(angle) * push * 4;
+      }
+    }
+
+    this.x += Math.cos(angle) * SPEED;
+    this.y += Math.sin(angle) * SPEED;
+    this.life++;
+
+    if (this.x < -20) this.x = W + 20;
+    if (this.x > W + 20) this.x = -20;
+    if (this.y < -20) this.y = H + 20;
+    if (this.y > H + 20) this.y = -20;
+    if (this.life > this.maxLife) this.reset();
+  }
+  draw(ctx) {
+    const lifeRatio = this.life / this.maxLife;
+    const alpha = Math.sin(lifeRatio * Math.PI) * 0.9;
+    const [r, g, b] = this.color;
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.fillRect(this.x, this.y, 1.6, 1.6);
+  }
+}
+
+let particles = Array.from({ length: PARTICLE_COUNT }, () => new Particle());
+
+const mouse = { x: 0, y: 0, active: false };
+window.addEventListener("mousemove", (e) => {
+  mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+  clearTimeout(mouse._t);
+  mouse._t = setTimeout(() => (mouse.active = false), 200);
+});
+window.addEventListener("touchmove", (e) => {
+  const t = e.touches[0];
+  if (!t) return;
+  mouse.x = t.clientX; mouse.y = t.clientY; mouse.active = true;
+  clearTimeout(mouse._t);
+  mouse._t = setTimeout(() => (mouse.active = false), 200);
+}, { passive: true });
+
+window.addEventListener("click", () => {
+  seedNoise();
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(0, 0, W, H);
+  particles.forEach(p => p.reset());
+});
+
+let frame = 0;
+function animate() {
+  frame++;
+  ctx.fillStyle = "rgba(0,0,0,0.06)";
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = "lighter";
+  const t = frame * TIME_SCALE;
+  for (const p of particles) {
+    p.step(t, mouse);
+    p.draw(ctx);
+  }
+  ctx.globalCompositeOperation = "source-over";
+
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
 </body>
 </html>
