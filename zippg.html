@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZipPG — midnightbandy</title>
+  <meta name="description" content="A verified search engine for PGs and co-living spaces in Pune. Owner-KYC and photo verification before a listing goes live.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <div class="brand">midnightbandy</div>
+      <nav class="site"><a href="index.html">All projects</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <a class="back-link" href="index.html">All projects</a>
+
+    <div class="case-header">
+      <div class="status">In development</div>
+      <h1>ZipPG</h1>
+      <p class="tagline">India's verified search engine for PGs, hostels, and co-living spaces — starting with Pune's Hinjewadi–Kharadi–Wakad–Magarpatta corridor.</p>
+      <div class="stack"><span>Next.js</span><span>Postgres · Neon</span><span>Prisma</span><span>Leaflet</span></div>
+    </div>
+
+    <section class="block">
+      <h3>The problem</h3>
+      <p>PG listings in most Indian cities are scraped, stale, or brokered — no way for a tenant to know a listing is real before showing up. ZipPG's answer: every listing is owner-KYC checked and photo/video verified before it goes live. No fake rooms, no broker markup.</p>
+    </section>
+
+    <section class="block">
+      <h3>ZipScore</h3>
+      <p>The actual product differentiation isn't the listings — it's a computed 0–100 trust score built from real platform activity: verification recency, verified-stay review quality, and price fairness against the local market. A scraper-based competitor can list the same address; they can't fabricate the activity a real score is built from.</p>
+    </section>
+
+    <section class="block">
+      <h3>How listings actually get onboarded</h3>
+      <p>Deliberately not scraping. A field-agent CRM turns a CSV import into a real prospect pipeline for manually onboarding PG owners who exist but aren't online yet — the actual answer to "how do you get real listings without scraping," decided early and held to since.</p>
+    </section>
+
+    <section class="block">
+      <h3>Where it stands</h3>
+      <p>Auth, listing CRUD, the verification console, in-app messaging, map-based search, and the ZipScore engine are all real and covered by automated tests — no mocks. Migrated from a local SQLite MVP to Postgres to get ready for a real deploy.</p>
+      <div class="note"><strong>Honest state:</strong> no live production deployment yet — that's the current, explicit priority, not an unknown. Photo storage is local-disk today, a known pre-launch gap, not a surprise.</div>
+    </section>
+
+  </main>
+
+  <footer class="site">
+    <div class="wrap"><a href="index.html">← All projects</a></div>
+  </footer>
+</body>
+</html>

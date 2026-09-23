@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infra Estimator — midnightbandy</title>
+  <meta name="description" content="A free, open-source, offline-first estimation platform for India's infrastructure tendering ecosystem. Every rate is traced to a cited government source and checksum-verified.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <div class="brand">midnightbandy</div>
+      <nav class="site"><a href="index.html">All projects</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <a class="back-link" href="index.html">All projects</a>
+
+    <div class="case-header">
+      <div class="status">Open source</div>
+      <h1>Infra Estimator</h1>
+      <p class="tagline">A free, offline-first estimation platform for India's infrastructure tendering ecosystem, built for a grant application — starting with a working CPWD module.</p>
+      <div class="stack"><span>Vite · React · TS</span><span>Dexie · IndexedDB</span><span>Python ingestion pipeline</span><span>Installable PWA</span></div>
+    </div>
+
+    <section class="block">
+      <h3>What it does</h3>
+      <p>Covers CPWD, MoRTH, and Maharashtra PWD estimation workflows, backed by a rate master where every figure traces to a cited government source — the CPWD Detailed Analysis of Rates, the MoRTH Standard Data Book, statutory GST/cess rules — not invented or scraped data.</p>
+    </section>
+
+    <section class="block">
+      <h3>The verification method is the actual engineering</h3>
+      <p>A citation alone isn't the bar here. For every rate build-up, the app's own calculation engine independently recomputes the rate from its labour/material/machinery components and compares the result against the source document's own published figure. An item that fails that check is excluded and disclosed — never force-included with a citation that doesn't actually check out.</p>
+      <p>That same discipline runs through the data pipeline: candidates get checksum-gated before they're trusted, failures get written to a report for manual review instead of silently dropped, and every digitisation pass is verified against the previous chapter's already-shipped output before it's trusted not to have broken anything.</p>
+    </section>
+
+    <section class="block">
+      <h3>Where it stands</h3>
+      <p>Several hundred CPWD rate items digitised with full build-ups, all citation-audited in CI. Coverage grows chapter by chapter — each one gets read against the actual source document, not assumed from a table of contents.</p>
+      <div class="note"><strong>Honest state:</strong> this is the one project on this page with nothing to hide behind a "coming soon" — the repo is public, the code is the source of truth, and the citation-audit script runs in CI on every change.</div>
+    </section>
+
+    <div class="links">
+      <a href="https://github.com/midnightbandy/infra-estimator" target="_blank" rel="noreferrer">View source →</a>
+    </div>
+
+  </main>
+
+  <footer class="site">
+    <div class="wrap"><a href="index.html">← All projects</a></div>
+  </footer>
+</body>
+</html>
