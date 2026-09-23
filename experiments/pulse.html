@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>pulse — midnightbandy</title>
+<meta name="description" content="a one-button timing game. hit the ring on the line.">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; inset: 0; display: block; }
+
+  .hud { position: fixed; z-index: 5; color: #7effe0; text-shadow: 0 0 8px rgba(0,240,255,0.5); pointer-events: none; }
+  .score { top: 28px; left: 32px; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(22px, 4vw, 34px); }
+  .lives { top: 28px; right: 32px; font-size: clamp(18px, 3vw, 26px); letter-spacing: 0.1em; }
+  .lives .lost { color: #2a1420; text-shadow: none; }
+  .flash { top: 44%; left: 50%; transform: translate(-50%, -50%); font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(20px, 5vw, 36px); opacity: 0; transition: opacity 0.08s ease, transform 0.25s ease; text-align: center; }
+  .hint { bottom: 26px; left: 50%; transform: translateX(-50%); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: #4d5a6a; text-align: center; white-space: nowrap; }
+  .back { bottom: 26px; left: 24px; font-size: 11px; color: #4d5a6a; pointer-events: auto; text-decoration: none; }
+  .back:hover { color: #7effe0; }
+
+  #over { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,0.88); display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #e8e6e1; }
+  #over.show { display: flex; }
+  #over .big { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(28px, 7vw, 52px); color: #ff2ed1; text-shadow: 0 0 14px rgba(255,46,209,0.7); margin-bottom: 10px; }
+  #over .final { font-size: 15px; color: #8b8d97; margin-bottom: 28px; }
+  #over .again { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: #00f0ff; border: 1px solid #1a3a3d; padding: 10px 22px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div class="hud score" id="score">0</div>
+<div class="hud lives" id="lives">● ● ●</div>
+<div class="hud flash" id="flash"></div>
+<div class="hud hint">space / click / tap — hit the ring on the line</div>
+<a class="hud back" href="../index.html">← midnightbandy</a>
+
+<div id="over">
+  <div class="big">signal lost</div>
+  <div class="final" id="finalScore">score: 0</div>
+  <div class="again">tap / click / space to run it back</div>
+</div>
+
+<script>
+// ---------- canvas setup ----------
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let W, H, DPR, cx, cy;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  cx = W / 2; cy = H / 2;
+}
+resize();
+window.addEventListener("resize", resize);
+
+// ---------- game state ----------
+// Deterministic model, hand-traced before shipping (see commit message):
+//   radius(t) = speed * t   -- grows linearly from 0 every round
+//   band = |radius - targetRadius|
+//     band <=  6  -> PERFECT, +100
+//     band <= 18  -> GOOD,    +50
+//     band <= 36  -> OK,      +20
+//     else if pressed -> MISS, +0, lose a life
+//   auto-miss (no input needed) if radius > targetRadius + 60 with no press yet this round
+//     -> also counts as a MISS, loses a life, resets round
+// speed increases 6% each successful (non-auto-miss) round, capped, so it
+// ramps but never becomes literally unreactable.
+const MAX_LIVES = 3;
+const BASE_SPEED = 90;     // px/sec at round 1
+const SPEED_GROWTH = 1.06;
+const SPEED_CAP = 340;     // px/sec ceiling
+const BAND_PERFECT = 6, BAND_GOOD = 18, BAND_OK = 36, BAND_AUTOMISS = 60;
+const MIN_TARGET = 90; // upper bound is computed per-call in randTarget() from live W/H
+
+let state = {
+  score: 0,
+  lives: MAX_LIVES,
+  speed: BASE_SPEED,
+  radius: 0,
+  targetRadius: 150,
+  roundStart: 0,
+  pressedThisRound: false,
+  gameOver: false,
+  flashTimer: 0,
+};
+
+function randTarget() {
+  const maxR = Math.max(MIN_TARGET + 40, Math.min(cx, cy) - 40);
+  return MIN_TARGET + Math.random() * (maxR - MIN_TARGET);
+}
+
+function newRound(keepSpeed) {
+  state.radius = 0;
+  state.targetRadius = randTarget();
+  state.roundStart = performance.now();
+  state.pressedThisRound = false;
+  if (!keepSpeed) {
+    state.speed = Math.min(SPEED_CAP, state.speed * SPEED_GROWTH);
+  }
+}
+
+function resetGame() {
+  state.score = 0;
+  state.lives = MAX_LIVES;
+  state.speed = BASE_SPEED;
+  state.gameOver = false;
+  document.getElementById("over").classList.remove("show");
+  newRound(true);
+}
+resetGame();
+
+function flash(text, color) {
+  const el = document.getElementById("flash");
+  el.textContent = text;
+  el.style.color = color;
+  el.style.textShadow = `0 0 14px ${color}`;
+  el.style.opacity = "1";
+  el.style.transform = "translate(-50%, -50%) scale(1.15)";
+  clearTimeout(flash._t);
+  flash._t = setTimeout(() => {
+    el.style.opacity = "0";
+    el.style.transform = "translate(-50%, -50%) scale(1)";
+  }, 260);
+}
+
+function loseLife() {
+  state.lives--;
+  if (state.lives <= 0) {
+    state.gameOver = true;
+    document.getElementById("finalScore").textContent = "score: " + state.score;
+    document.getElementById("over").classList.add("show");
+  } else {
+    newRound(false);
+  }
+}
+
+function handlePress() {
+  if (state.gameOver) { resetGame(); return; }
+  if (state.pressedThisRound) return; // one press counts per round
+  state.pressedThisRound = true;
+
+  const band = Math.abs(state.radius - state.targetRadius);
+  if (band <= BAND_PERFECT) {
+    state.score += 100; flash("PERFECT", "#00f0ff"); newRound(false);
+  } else if (band <= BAND_GOOD) {
+    state.score += 50; flash("GOOD", "#7effe0"); newRound(false);
+  } else if (band <= BAND_OK) {
+    state.score += 20; flash("OK", "#d9a44d"); newRound(false);
+  } else {
+    flash("MISS", "#ff2ed1"); loseLife();
+  }
+  document.getElementById("score").textContent = state.score;
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") { e.preventDefault(); handlePress(); }
+});
+window.addEventListener("mousedown", handlePress);
+window.addEventListener("touchstart", (e) => { e.preventDefault(); handlePress(); }, { passive: false });
+
+// ---------- render loop ----------
+function render(now) {
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.fillRect(0, 0, W, H);
+
+  if (!state.gameOver) {
+    const elapsed = (now - state.roundStart) / 1000;
+    state.radius = state.speed * elapsed;
+
+    // auto-miss if the ring blew past the target with no input
+    if (!state.pressedThisRound && state.radius > state.targetRadius + BAND_AUTOMISS) {
+      state.pressedThisRound = true;
+      flash("MISS", "#ff2ed1");
+      loseLife();
+    }
+
+    // target ring (static, magenta)
+    ctx.beginPath();
+    ctx.arc(cx, cy, state.targetRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,46,209,0.85)";
+    ctx.lineWidth = 2;
+    ctx.shadowColor = "#ff2ed1"; ctx.shadowBlur = 12;
+    ctx.stroke();
+
+    // expanding ring (cyan)
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(0, state.radius), 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(0,240,255,0.9)";
+    ctx.lineWidth = 2.4;
+    ctx.shadowColor = "#00f0ff"; ctx.shadowBlur = 14;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // center dot
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    ctx.fillStyle = "#e8e6e1";
+    ctx.fill();
+  }
+
+  document.getElementById("lives").innerHTML =
+    Array.from({ length: MAX_LIVES }, (_, i) =>
+      i < state.lives ? "●" : '<span class="lost">●</span>'
+    ).join(" ");
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

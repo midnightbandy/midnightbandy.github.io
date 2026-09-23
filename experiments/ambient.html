@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>midnightbandy — ambient</title>
+<meta name="description" content="a generative pad, hand-synthesized, no samples.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2250%22 y=%2268%22 font-size=%2260%22 text-anchor=%22middle%22 fill=%22%23ffb454%22>♪</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; }
+
+  canvas { position: fixed; inset: 0; display: block; z-index: 1; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,0.6) 100%);
+  }
+
+  .hud {
+    position: fixed; z-index: 5; color: #ffb454;
+    text-shadow: 0 0 8px rgba(255,180,84,0.45);
+    user-select: none; pointer-events: none;
+  }
+
+  .wordmark {
+    top: 32px; left: 32px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: clamp(20px, 3.6vw, 32px);
+    letter-spacing: -0.02em;
+    color: #dfe6ef;
+    text-shadow: none;
+  }
+  .wordmark span { color: #ffb454; text-shadow: 0 0 10px rgba(255,180,84,0.6); }
+
+  .tagline {
+    top: 72px; left: 33px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #5a6472;
+    text-shadow: none;
+  }
+
+  .back {
+    top: 32px; right: 32px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #5a6472;
+    text-shadow: none;
+    pointer-events: auto;
+  }
+  .back a { color: #61e8c8; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+
+  .meta {
+    bottom: 28px; left: 32px;
+    font-size: 11px;
+    color: #5a6472;
+    max-width: 58ch;
+    line-height: 1.6;
+    text-shadow: none;
+  }
+
+  #startOverlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.55);
+  }
+  #startBtn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #0c0e13;
+    background: #ffb454;
+    border: none;
+    padding: 16px 30px;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 0 30px rgba(255,180,84,0.35);
+  }
+  #startBtn:hover { background: #ffc57a; }
+  #startBtn.playing { background: #191c26; color: #ffb454; border: 1px solid #ffb454; box-shadow: none; }
+
+  @media (max-width: 620px) {
+    .tagline, .meta { max-width: 80vw; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="vis"></canvas>
+<div id="vignette"></div>
+
+<div class="hud wordmark">midnight<span>bandy</span> / ambient</div>
+<div class="hud tagline">hand-synthesized pad · no samples · no libraries</div>
+<div class="hud back"><a href="../index.html">← back</a></div>
+<div class="hud meta">
+  Web Audio API only — oscillators, filters, and a procedurally-generated
+  noise buffer for the crackle layer. A minor pentatonic, so the sparse
+  plucks never land on a wrong note. The ring reacts to the actual audio
+  graph output, not a separate animation.
+</div>
+
+<div id="startOverlay">
+  <button id="startBtn">▶ start</button>
+</div>
+
+<script>
+// ---------- music theory: A minor pentatonic, semitone offsets from root ----------
+const SCALE = [0, 3, 5, 7, 10];
+const ROOT_FREQ = 110; // A2
+
+function noteFreq(scaleIndex, octaveShift) {
+  const idx = ((scaleIndex % SCALE.length) + SCALE.length) % SCALE.length; // always in-bounds
+  const semitone = SCALE[idx] + octaveShift * 12;
+  return ROOT_FREQ * Math.pow(2, semitone / 12);
+}
+
+// ---------- audio graph ----------
+let ctx = null;
+let masterGain = null;
+let analyser = null;
+let padVoices = [];
+let crackleSource = null;
+let running = false;
+let padTimer = null;
+let pluckTimer = null;
+
+function buildNoiseBuffer(audioCtx, seconds) {
+  const length = Math.floor(audioCtx.sampleRate * seconds);
+  const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    let sample = (Math.random() * 2 - 1) * 0.015; // quiet base hiss
+    if (Math.random() < 0.0006) {
+      // an occasional crackle "pop" — short, louder, decays over a few samples
+      sample += (Math.random() * 2 - 1) * (0.25 + Math.random() * 0.35);
+    }
+    data[i] = sample;
+  }
+  return buffer;
+}
+
+function startPadVoice(scaleIndex, octaveShift, filterFreq) {
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  osc.frequency.value = noteFreq(scaleIndex, octaveShift);
+
+  const detOsc = ctx.createOscillator();
+  detOsc.type = "triangle";
+  detOsc.frequency.value = noteFreq(scaleIndex, octaveShift) * 1.004; // slight detune, warmth
+
+  const voiceGain = ctx.createGain();
+  voiceGain.gain.value = 0;
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = filterFreq;
+  filter.Q.value = 0.7;
+
+  osc.connect(voiceGain);
+  detOsc.connect(voiceGain);
+  voiceGain.connect(filter);
+  filter.connect(masterGain);
+
+  osc.start();
+  detOsc.start();
+
+  const now = ctx.currentTime;
+  const peak = 0.09 + Math.random() * 0.04;
+  voiceGain.gain.cancelScheduledValues(now);
+  voiceGain.gain.setValueAtTime(0, now);
+  voiceGain.gain.linearRampToValueAtTime(peak, now + 4); // slow attack
+
+  return { osc, detOsc, voiceGain, filter };
+}
+
+function stopPadVoice(voice) {
+  const now = ctx.currentTime;
+  voice.voiceGain.gain.cancelScheduledValues(now);
+  voice.voiceGain.gain.setValueAtTime(voice.voiceGain.gain.value, now);
+  voice.voiceGain.gain.linearRampToValueAtTime(0.0001, now + 3); // slow release
+  const stopAt = now + 3.2;
+  voice.osc.stop(stopAt);
+  voice.detOsc.stop(stopAt);
+  voice.osc.onended = () => {
+    voice.osc.disconnect();
+    voice.detOsc.disconnect();
+    voice.voiceGain.disconnect();
+    voice.filter.disconnect();
+  };
+}
+
+function changeChord() {
+  const old = padVoices;
+  padVoices = [];
+
+  // three-note chord drawn from the pentatonic scale across two octaves
+  const chordIdx = [0, Math.floor(Math.random() * SCALE.length), Math.floor(Math.random() * SCALE.length)];
+  const octaves = [-1, 0, Math.random() < 0.5 ? 0 : 1];
+  chordIdx.forEach((idx, i) => {
+    padVoices.push(startPadVoice(idx, octaves[i], 500 + Math.random() * 700));
+  });
+
+  old.forEach(stopPadVoice);
+}
+
+function pluckOnce() {
+  const idx = Math.floor(Math.random() * SCALE.length);
+  const octave = Math.random() < 0.5 ? 1 : 2;
+  const freq = noteFreq(idx, octave);
+
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.value = freq;
+
+  const gain = ctx.createGain();
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 1800;
+  filter.Q.value = 1.2;
+
+  osc.connect(gain);
+  gain.connect(filter);
+  filter.connect(masterGain);
+
+  const now = ctx.currentTime;
+  const peak = 0.12 + Math.random() * 0.06;
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(peak, now + 0.02); // fast pluck attack
+  gain.gain.exponentialRampToValueAtTime(0.0005, now + 2.2); // decay — never targets literal 0
+
+  osc.start(now);
+  const stopAt = now + 2.3;
+  osc.stop(stopAt);
+  osc.onended = () => { osc.disconnect(); gain.disconnect(); filter.disconnect(); };
+}
+
+function schedulePluck() {
+  pluckOnce();
+  const nextIn = 2500 + Math.random() * 5000; // sparse, irregular
+  pluckTimer = setTimeout(schedulePluck, nextIn);
+}
+
+function scheduleChords() {
+  changeChord();
+  const nextIn = 9000 + Math.random() * 7000;
+  padTimer = setTimeout(scheduleChords, nextIn);
+}
+
+function startAudio() {
+  if (!ctx) {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = ctx.createGain();
+    masterGain.gain.value = 0.5;
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    masterGain.connect(analyser);
+    analyser.connect(ctx.destination);
+
+    const noiseBuffer = buildNoiseBuffer(ctx, 8);
+    crackleSource = ctx.createBufferSource();
+    crackleSource.buffer = noiseBuffer;
+    crackleSource.loop = true;
+    const crackleGain = ctx.createGain();
+    crackleGain.gain.value = 0.35;
+    const crackleFilter = ctx.createBiquadFilter();
+    crackleFilter.type = "highpass";
+    crackleFilter.frequency.value = 1200;
+    crackleSource.connect(crackleFilter);
+    crackleFilter.connect(crackleGain);
+    crackleGain.connect(masterGain);
+    crackleSource.start();
+  }
+  if (ctx.state === "suspended") ctx.resume();
+
+  scheduleChords();
+  schedulePluck();
+  running = true;
+}
+
+function stopAudio() {
+  running = false;
+  clearTimeout(padTimer);
+  clearTimeout(pluckTimer);
+  padVoices.forEach(stopPadVoice);
+  padVoices = [];
+  if (ctx) ctx.suspend();
+}
+
+// ---------- UI ----------
+const startBtn = document.getElementById("startBtn");
+const startOverlay = document.getElementById("startOverlay");
+startBtn.addEventListener("click", () => {
+  if (!running) {
+    startAudio();
+    startBtn.textContent = "⏸ stop";
+    startBtn.classList.add("playing");
+    setTimeout(() => { startOverlay.style.background = "transparent"; startOverlay.style.pointerEvents = "none"; startBtn.style.pointerEvents = "auto"; }, 300);
+  } else {
+    stopAudio();
+    startBtn.textContent = "▶ resume";
+    startBtn.classList.remove("playing");
+  }
+});
+
+// ---------- visualizer, driven by the real analyser output ----------
+const canvas = document.getElementById("vis");
+const vctx = canvas.getContext("2d");
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener("resize", resize);
+
+const timeData = new Uint8Array(1024);
+const freqData = new Uint8Array(512);
+
+function draw() {
+  requestAnimationFrame(draw);
+  const W = canvas.width, H = canvas.height;
+  vctx.fillStyle = "rgba(0,0,0,0.18)";
+  vctx.fillRect(0, 0, W, H);
+
+  if (!analyser) return;
+  analyser.getByteTimeDomainData(timeData);
+  analyser.getByteFrequencyData(freqData);
+
+  let sum = 0;
+  for (let i = 0; i < freqData.length; i++) sum += freqData[i];
+  const avg = sum / freqData.length; // 0..255, real amplitude proxy
+
+  const cx = W / 2, cy = H / 2;
+  const baseR = Math.min(W, H) * 0.16;
+  const pulseR = baseR + avg * 1.1;
+
+  // soft glow disc, size driven by real frequency-domain energy
+  const grad = vctx.createRadialGradient(cx, cy, 0, cx, cy, pulseR * 1.6);
+  grad.addColorStop(0, "rgba(255,180,84,0.20)");
+  grad.addColorStop(1, "rgba(255,180,84,0)");
+  vctx.fillStyle = grad;
+  vctx.beginPath();
+  vctx.arc(cx, cy, pulseR * 1.6, 0, Math.PI * 2);
+  vctx.fill();
+
+  // waveform ring, driven by real time-domain samples
+  vctx.beginPath();
+  for (let i = 0; i < timeData.length; i++) {
+    const angle = (i / timeData.length) * Math.PI * 2;
+    const v = (timeData[i] - 128) / 128; // -1..1
+    const r = baseR + v * 40;
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    if (i === 0) vctx.moveTo(x, y); else vctx.lineTo(x, y);
+  }
+  vctx.closePath();
+  vctx.strokeStyle = "rgba(97,232,200,0.55)";
+  vctx.lineWidth = 1.5;
+  vctx.stroke();
+}
+draw();
+</script>
+</body>
+</html>
