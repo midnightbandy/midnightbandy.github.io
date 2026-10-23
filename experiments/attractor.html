@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>attractor — midnightbandy</title>
+<meta name="description" content="de Jong strange attractor, hand-rolled. move to morph, click to reroll.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2250%22 y=%2268%22 font-size=%2256%22 text-anchor=%22middle%22 fill=%22%237b2ff7%22>✧</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; image-rendering: auto; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #d7cfff;
+    text-shadow: 0 0 8px rgba(123,47,247,0.5);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #786c99; text-shadow: none; max-width: 42ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #786c99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #4d4466; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">de Jong <span>//</span> attractor</div>
+<div class="hud desc">a four-parameter chaotic map, iterated hundreds of thousands of times a second. nobody drew this either.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">move to morph · click / tap / r — reroll</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0, counts = null, img = null;
+
+  function resize() {
+    const targetW = Math.min(window.innerWidth, 640);
+    const scale = targetW / window.innerWidth;
+    W = Math.max(160, Math.round(window.innerWidth * scale));
+    H = Math.max(120, Math.round(window.innerHeight * scale));
+    canvas.width = W;
+    canvas.height = H;
+    counts = new Float32Array(W * H);
+    img = ctx.createImageData(W, H);
+    // fully opaque from the start
+    for (let i = 3; i < img.data.length; i += 4) img.data[i] = 255;
+  }
+
+  // ---------- color LUT (log-scaled density -> neon gradient) ----------
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const stops = [
+    [0.00, hexToRgb('#000000')],
+    [0.14, hexToRgb('#0a1240')],
+    [0.34, hexToRgb('#5a2bd8')],
+    [0.58, hexToRgb('#00f0ff')],
+    [0.80, hexToRgb('#ff2ed1')],
+    [1.00, hexToRgb('#eafff6')],
+  ];
+  const LUT = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let s0 = stops[0], s1 = stops[stops.length - 1];
+    for (let k = 0; k < stops.length - 1; k++) {
+      if (t >= stops[k][0] && t <= stops[k + 1][0]) { s0 = stops[k]; s1 = stops[k + 1]; break; }
+    }
+    const span = (s1[0] - s0[0]) || 1;
+    const lt = (t - s0[0]) / span;
+    for (let c = 0; c < 3; c++) {
+      LUT[i * 3 + c] = s0[1][c] + (s1[1][c] - s0[1][c]) * lt;
+    }
+  }
+
+  // ---------- de Jong map: always bounded in [-2,2], no clamping needed ----------
+  // x' = sin(a*y) - cos(b*x)
+  // y' = sin(c*x) - cos(d*y)
+  function stepMap(x, y, a, b, c, d) {
+    return [Math.sin(a * y) - Math.cos(b * x), Math.sin(c * x) - Math.cos(d * y)];
+  }
+
+  function rand(min, max) { return min + Math.random() * (max - min); }
+
+  // cheap quick-check: is this parameter set a boring fixed point / short cycle?
+  function isDegenerate(a, b, c, d) {
+    let x = 0.1, y = 0.1;
+    for (let i = 0; i < 200; i++) { [x, y] = stepMap(x, y, a, b, c, d); }
+    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+    const seen = new Set();
+    for (let i = 0; i < 3000; i++) {
+      [x, y] = stepMap(x, y, a, b, c, d);
+      bx0 = Math.min(bx0, x); bx1 = Math.max(bx1, x);
+      by0 = Math.min(by0, y); by1 = Math.max(by1, y);
+      seen.add(((x * 50) | 0) + ',' + ((y * 50) | 0));
+    }
+    return (bx1 - bx0) * (by1 - by0) < 0.05 || seen.size < 40;
+  }
+
+  function pickSeed() {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const a = rand(-3, 3), b = rand(-3, 3), c = rand(-3, 3), d = rand(-3, 3);
+      if (!isDegenerate(a, b, c, d)) return [a, b, c, d];
+    }
+    return [1.4, -2.3, 2.4, -2.1]; // known-good fallback (classic de Jong)
+  }
+
+  let [baseA, baseB, baseC, baseD] = pickSeed();
+  let a = baseA, b = baseB;
+  let px = 0.1, py = 0.1;
+  const MORPH_RANGE = 1.3;
+  let targetMX = 0.5, targetMY = 0.5;
+
+  function reroll() {
+    [baseA, baseB, baseC, baseD] = pickSeed();
+    counts.fill(0);
+  }
+
+  // ---------- pointer interaction: hover/drag morphs, a quick tap/click rerolls ----------
+  let downAt = 0, downX = 0, downY = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    downAt = performance.now();
+    downX = e.clientX; downY = e.clientY;
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    const dt = performance.now() - downAt;
+    const dist = Math.hypot(e.clientX - downX, e.clientY - downY);
+    if (dt < 300 && dist < 8) reroll();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    targetMX = e.clientX / window.innerWidth;
+    targetMY = e.clientY / window.innerHeight;
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') reroll();
+  });
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- main loop ----------
+  let K = 220000;
+  const K_MIN = 20000, K_MAX = 650000;
+  let maxCountSmoothed = 1;
+  let lastParamUpdate = 0;
+
+  function frame() {
+    const t0 = performance.now();
+
+    a += (baseA + (targetMX - 0.5) * 2 * MORPH_RANGE - a) * 0.06;
+    b += (baseB + (targetMY - 0.5) * 2 * MORPH_RANGE - b) * 0.06;
+    const c = baseC, d = baseD;
+
+    // decay existing density so the image follows the live morph
+    for (let i = 0; i < counts.length; i++) counts[i] *= 0.9;
+
+    let x = px, y = py;
+    let localMax = 0;
+    for (let i = 0; i < K; i++) {
+      [x, y] = stepMap(x, y, a, b, c, d);
+      const ix = ((x + 2) * 0.25 * W) | 0;
+      const iy = ((y + 2) * 0.25 * H) | 0;
+      if (ix >= 0 && ix < W && iy >= 0 && iy < H) {
+        const idx = iy * W + ix;
+        const v = counts[idx] + 1;
+        counts[idx] = v;
+        if (v > localMax) localMax = v;
+      }
+    }
+    px = x; py = y;
+
+    maxCountSmoothed += (Math.max(localMax, 1) - maxCountSmoothed) * 0.1;
+    const denom = Math.log1p(Math.max(maxCountSmoothed, 1));
+    const data = img.data;
+    for (let i = 0, p = 0; i < counts.length; i++, p += 4) {
+      const v = counts[i];
+      let lutIdx = 0;
+      if (v > 0 && denom > 0) {
+        lutIdx = (Math.log1p(v) / denom * 255) | 0;
+        if (lutIdx > 255) lutIdx = 255;
+      }
+      data[p] = LUT[lutIdx * 3];
+      data[p + 1] = LUT[lutIdx * 3 + 1];
+      data[p + 2] = LUT[lutIdx * 3 + 2];
+    }
+    ctx.putImageData(img, 0, 0);
+
+    const dt = performance.now() - t0;
+    if (dt > 22 && K > K_MIN) K = Math.max(K_MIN, Math.round(K * 0.85));
+    else if (dt < 12 && K < K_MAX) K = Math.min(K_MAX, Math.round(K * 1.05));
+
+    const now = performance.now();
+    if (now - lastParamUpdate > 150) {
+      lastParamUpdate = now;
+      paramsEl.textContent =
+        'a ' + a.toFixed(2).padStart(5) + '\n' +
+        'b ' + b.toFixed(2).padStart(5) + '\n' +
+        'c ' + c.toFixed(2).padStart(5) + '\n' +
+        'd ' + d.toFixed(2).padStart(5);
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
