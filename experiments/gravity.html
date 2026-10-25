@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>gravity — midnightbandy</title>
+<meta name="description" content="a binary star and a swarm of dust, hand-rolled n-body. drag to pull, tap to scatter more.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><circle cx=%2238%22 cy=%2250%22 r=%2212%22 fill=%22%2300f0ff%22/><circle cx=%2268%22 cy=%2250%22 r=%228%22 fill=%22%23ff2ed1%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 44ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">gravity <span>//</span> midnightbandy</div>
+<div class="hud desc">a binary star, mutually orbiting, and a few hundred motes of dust that feel it. nobody choreographed the dust — the two stars did.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">drag — pull the dust · tap — scatter more</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // --- scale-invariant constants, derived once from the starting viewport ---
+  const BASE = Math.min(W, H);
+  const K = BASE / 900; // tuning was verified at a 900px minor axis
+
+  const G = 2400;
+  const m1 = 1400, m2 = 900;
+  const Mtot = m1 + m2;
+  const SOFT2 = Math.pow(26 * K, 2);       // softening epsilon^2: no singularity at r -> 0
+  const MAX_SPEED = 900 * K;               // px/s speed cap on dust
+  const CURSOR_MASS = 1800;
+
+  let d0 = 220 * K; // binary separation
+  const vRel = Math.sqrt(G * Mtot / d0); // exact circular-orbit relative speed
+
+  let rel = { x: d0, y: 0 };
+  let relV = { x: 0, y: vRel };
+
+  function stepBinary(dt) {
+    const r2 = rel.x * rel.x + rel.y * rel.y;
+    const r = Math.sqrt(r2);
+    const a = -G * Mtot / (r2 * r);
+    relV.x += a * rel.x * dt;
+    relV.y += a * rel.y * dt;
+    rel.x += relV.x * dt;
+    rel.y += relV.y * dt;
+  }
+
+  function starPositions() {
+    const cx = W / 2, cy = H / 2;
+    return [
+      { x: cx - (m2 / Mtot) * rel.x, y: cy - (m2 / Mtot) * rel.y, m: m1, color: '#00f0ff', glow: 'rgba(0,240,255,' },
+      { x: cx + (m1 / Mtot) * rel.x, y: cy + (m1 / Mtot) * rel.y, m: m2, color: '#ff2ed1', glow: 'rgba(255,46,209,' },
+    ];
+  }
+
+  function accel(px, py, sx, sy, mass) {
+    const dx = sx - px, dy = sy - py;
+    const r2 = dx * dx + dy * dy + SOFT2;
+    const invR3 = 1 / (r2 * Math.sqrt(r2));
+    const f = G * mass * invR3;
+    return [dx * f, dy * f];
+  }
+
+  const PALETTE = ['#00f0ff', '#ff2ed1', '#7b2ff7', '#5affc4'];
+  const MAX_DUST = 900;
+  const dust = [];
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function seed(n) {
+    for (let i = 0; i < n; i++) {
+      dust.push({
+        x: rand(0, W), y: rand(0, H),
+        vx: rand(-20, 20), vy: rand(-20, 20),
+        px: 0, py: 0,
+        c: PALETTE[i % PALETTE.length],
+      });
+    }
+  }
+  seed(Math.round(420 * (W * H) / (1600 * 900)) || 420);
+
+  function burst(x, y, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = rand(10, 80);
+      dust.push({
+        x, y,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        px: x, py: y,
+        c: PALETTE[(dust.length + i) % PALETTE.length],
+      });
+    }
+    const over = dust.length - MAX_DUST;
+    if (over > 0) dust.splice(0, over);
+  }
+
+  const pointer = { x: -9999, y: -9999, active: false };
+  canvas.addEventListener('pointermove', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY;
+  });
+  canvas.addEventListener('pointerleave', () => { pointer.active = false; });
+  canvas.addEventListener('pointerdown', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY;
+    pointer.active = true;
+    burst(e.clientX, e.clientY, 36);
+  });
+  canvas.addEventListener('pointerup', () => { pointer.active = false; });
+
+  let last = performance.now();
+  const MAX_DT = 1 / 30; // clamp so a tab-switch stall can't fling the sim
+
+  function step(dt) {
+    stepBinary(dt);
+    const stars = starPositions();
+
+    const cursorMass = pointer.active ? CURSOR_MASS * 1.8 : CURSOR_MASS * 0.55;
+    const haveCursor = pointer.x > -1000;
+
+    for (const p of dust) {
+      p.px = p.x; p.py = p.y;
+      let ax = 0, ay = 0;
+      for (const s of stars) {
+        const [sax, say] = accel(p.x, p.y, s.x, s.y, s.m);
+        ax += sax; ay += say;
+      }
+      if (haveCursor) {
+        const [cax, cay] = accel(p.x, p.y, pointer.x, pointer.y, cursorMass);
+        ax += cax; ay += cay;
+      }
+      p.vx += ax * dt; p.vy += ay * dt;
+      const speed = Math.hypot(p.vx, p.vy);
+      if (speed > MAX_SPEED) {
+        const s = MAX_SPEED / speed;
+        p.vx *= s; p.vy *= s;
+      }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+
+      if (p.x < 0) { p.x += W; p.px += W; }
+      else if (p.x >= W) { p.x -= W; p.px -= W; }
+      if (p.y < 0) { p.y += H; p.py += H; }
+      else if (p.y >= H) { p.y -= H; p.py -= H; }
+    }
+    return stars;
+  }
+
+  function draw(stars) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,2,0.16)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (const p of dust) {
+      const sp = Math.hypot(p.vx, p.vy);
+      ctx.globalAlpha = Math.min(1, 0.22 + sp / MAX_SPEED);
+      ctx.strokeStyle = p.c;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(p.px, p.py);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    for (const s of stars) {
+      const r = 6 * K + (s.m / 1400) * 4 * K;
+      const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r * 7);
+      grad.addColorStop(0, s.glow + '0.9)');
+      grad.addColorStop(0.25, s.glow + '0.35)');
+      grad.addColorStop(1, s.glow + '0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r * 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (pointer.x > -1000) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = pointer.active ? 'rgba(123,47,247,0.55)' : 'rgba(123,47,247,0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, pointer.active ? 14 : 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  let frame = 0;
+  function tick(now) {
+    const dt = Math.min(MAX_DT, Math.max(0, (now - last) / 1000));
+    last = now;
+    const stars = step(dt);
+    draw(stars);
+    if (frame % 15 === 0) {
+      paramsEl.textContent = `dust ${dust.length}\nG ${G}  m1 ${m1}  m2 ${m2}`;
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(tick); });
+})();
+</script>
+
+</body>
+</html>
