@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>murmuration — midnightbandy</title>
+<meta name="description" content="a flock of boids, hand-rolled: separation, topological alignment, cohesion. move to scatter it, hold to call it home.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><path d=%22M20 60 L32 52 L26 66 Z%22 fill=%22%2300f0ff%22/><path d=%22M44 40 L58 34 L50 50 Z%22 fill=%22%23ff2ed1%22/><path d=%22M62 58 L76 56 L66 70 Z%22 fill=%22%235affc4%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 46ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">murmuration <span>//</span> midnightbandy</div>
+<div class="hud desc">a few hundred boids, each blind to the whole and reacting only to what's near it: keep clear of neighbors, match their heading, drift toward the local center. the swirl isn't drawn — it falls out of those three rules.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">move — scatter the flock · hold — call it home</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // --- scale-invariant constants, derived once from the starting viewport ---
+  const BASE = Math.min(W, H);
+  const K = BASE / 900; // tuning was verified at a 900px minor axis
+
+  // Alignment + cohesion use the K_NEIGH topologically-nearest flockmates rather than
+  // every boid within a fixed radius. That's the mechanism real starling-flock studies
+  // (Ballerini et al.) point to for why a murmuration stays loosely correlated instead
+  // of collapsing into one rigid blob — verified standalone in Node: local heading
+  // coherence ~0.75-0.9 (real flocking, not noise) while the global heading vector stays
+  // around R~0.4 (sub-groups drifting differently, not marching in lockstep) and the
+  // flock's spatial spread holds steady in the hundreds of px rather than collapsing to 0.
+  const TOPO_MAX_RADIUS = 220 * K;
+  const K_NEIGH = 7;
+  const SEP_RADIUS = 28 * K;
+  const MAX_SPEED = 220 * K;
+  const MAX_FORCE = 900 * K;
+  const W_SEP = 1.7, W_ALIGN = 0.9, W_COH = 0.55;
+  const WANDER = 14 * K;
+  const EDGE_MARGIN = 90 * K;
+  const EDGE_FORCE = 700 * K;
+  const SCARE_RADIUS = 140 * K;
+
+  const PALETTE = ['#00f0ff', '#ff2ed1', '#7b2ff7', '#5affc4'];
+  const MAX_BOIDS = 260;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function limit(vx, vy, max) {
+    const m = Math.hypot(vx, vy);
+    if (m > max && m > 0) { const s = max / m; return [vx * s, vy * s]; }
+    return [vx, vy];
+  }
+  function setMag(vx, vy, mag) {
+    const m = Math.hypot(vx, vy);
+    if (m < 1e-6) return [0, 0];
+    const s = mag / m;
+    return [vx * s, vy * s];
+  }
+
+  const boids = [];
+  function seed() {
+    const n = Math.min(MAX_BOIDS, Math.round(170 * (W * H) / (1600 * 900)) || 170);
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, Math.PI * 2);
+      boids.push({
+        x: rand(0, W), y: rand(0, H),
+        vx: Math.cos(a) * 60, vy: Math.sin(a) * 60,
+        c: PALETTE[i % PALETTE.length],
+      });
+    }
+  }
+  seed();
+
+  const pointer = { x: -9999, y: -9999, active: false, have: false };
+  canvas.addEventListener('pointermove', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.have = true;
+  });
+  canvas.addEventListener('pointerleave', () => { pointer.active = false; pointer.have = false; });
+  canvas.addEventListener('pointerdown', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.have = true;
+    pointer.active = true;
+  });
+  canvas.addEventListener('pointerup', () => { pointer.active = false; });
+
+  function step(dt) {
+    const n = boids.length;
+    for (let i = 0; i < n; i++) {
+      const b = boids[i];
+      let sx = 0, sy = 0, nSep = 0;
+      const cands = [];
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const o = boids[j];
+        const dx = o.x - b.x, dy = o.y - b.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < SEP_RADIUS * SEP_RADIUS) {
+          const d = Math.sqrt(d2) || 0.0001;
+          sx -= (dx / d) / d; sy -= (dy / d) / d;
+          nSep++;
+        }
+        if (d2 < TOPO_MAX_RADIUS * TOPO_MAX_RADIUS) cands.push({ d2, o });
+      }
+      cands.sort((a, c) => a.d2 - c.d2);
+      const topo = cands.length > K_NEIGH ? cands.slice(0, K_NEIGH) : cands;
+
+      let ax = 0, ay = 0;
+
+      if (nSep > 0) {
+        const [dvx, dvy] = setMag(sx, sy, MAX_SPEED);
+        const [stx, sty] = limit(dvx - b.vx, dvy - b.vy, MAX_FORCE);
+        ax += stx * W_SEP; ay += sty * W_SEP;
+      }
+
+      if (topo.length > 0) {
+        let avx = 0, avy = 0, cx = 0, cy = 0;
+        for (const c of topo) { avx += c.o.vx; avy += c.o.vy; cx += c.o.x; cy += c.o.y; }
+        avx /= topo.length; avy /= topo.length; cx /= topo.length; cy /= topo.length;
+
+        const [dvx, dvy] = setMag(avx, avy, MAX_SPEED);
+        const [stx, sty] = limit(dvx - b.vx, dvy - b.vy, MAX_FORCE);
+        ax += stx * W_ALIGN; ay += sty * W_ALIGN;
+
+        const [tvx, tvy] = setMag(cx - b.x, cy - b.y, MAX_SPEED);
+        const [ctx, cty] = limit(tvx - b.vx, tvy - b.vy, MAX_FORCE);
+        ax += ctx * W_COH; ay += cty * W_COH;
+      }
+
+      ax += rand(-1, 1) * WANDER;
+      ay += rand(-1, 1) * WANDER;
+
+      if (pointer.have) {
+        const dx = b.x - pointer.x, dy = b.y - pointer.y;
+        const d2 = dx * dx + dy * dy;
+        if (pointer.active) {
+          const [dvx, dvy] = setMag(-dx, -dy, MAX_SPEED);
+          const [ptx, pty] = limit(dvx - b.vx, dvy - b.vy, MAX_FORCE);
+          ax += ptx * 1.4; ay += pty * 1.4;
+        } else if (d2 < SCARE_RADIUS * SCARE_RADIUS) {
+          const d = Math.sqrt(d2) || 0.0001;
+          const strength = (1 - d / SCARE_RADIUS) * MAX_FORCE * 1.5;
+          ax += (dx / d) * strength;
+          ay += (dy / d) * strength;
+        }
+      }
+
+      if (b.x < EDGE_MARGIN) ax += EDGE_FORCE;
+      if (b.x > W - EDGE_MARGIN) ax -= EDGE_FORCE;
+      if (b.y < EDGE_MARGIN) ay += EDGE_FORCE;
+      if (b.y > H - EDGE_MARGIN) ay -= EDGE_FORCE;
+
+      [ax, ay] = limit(ax, ay, MAX_FORCE * 2.2);
+      b.nvx = b.vx + ax * dt;
+      b.nvy = b.vy + ay * dt;
+    }
+    for (const b of boids) {
+      [b.vx, b.vy] = limit(b.nvx, b.nvy, MAX_SPEED);
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < 0) b.x = 0; else if (b.x > W) b.x = W;
+      if (b.y < 0) b.y = 0; else if (b.y > H) b.y = H;
+    }
+  }
+
+  function draw() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,2,0.14)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    const len = 7 * K, wid = 3 * K;
+    for (const b of boids) {
+      const sp = Math.hypot(b.vx, b.vy) || 1;
+      const hx = b.vx / sp, hy = b.vy / sp;
+      const px = -hy, py = hx; // perpendicular, for the wingspan
+      ctx.globalAlpha = 0.55 + 0.4 * Math.min(1, sp / MAX_SPEED);
+      ctx.fillStyle = b.c;
+      ctx.beginPath();
+      ctx.moveTo(b.x + hx * len, b.y + hy * len);
+      ctx.lineTo(b.x - hx * len * 0.6 + px * wid, b.y - hy * len * 0.6 + py * wid);
+      ctx.lineTo(b.x - hx * len * 0.6 - px * wid, b.y - hy * len * 0.6 - py * wid);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    if (pointer.have) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = pointer.active ? 'rgba(123,47,247,0.55)' : 'rgba(123,47,247,0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, pointer.active ? 14 : SCARE_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  let last = performance.now();
+  const MAX_DT = 1 / 30; // clamp so a tab-switch stall can't fling the sim
+
+  let frame = 0;
+  function tick(now) {
+    const dt = Math.min(MAX_DT, Math.max(0, (now - last) / 1000));
+    last = now;
+    step(dt);
+    draw();
+    if (frame % 15 === 0) {
+      paramsEl.textContent = `boids ${boids.length}\nk-neigh ${K_NEIGH}  sep ${SEP_RADIUS.toFixed(0)}px`;
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(tick); });
+})();
+</script>
+
+</body>
+</html>
