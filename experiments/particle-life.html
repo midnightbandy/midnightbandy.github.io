@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>particle life — midnightbandy</title>
+<meta name="description" content="hand-rolled particle life: four neon species under a random attract/repel matrix. tap to reroll the rules.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><circle cx=%2232%22 cy=%2236%22 r=%227%22 fill=%22%2300f0ff%22/><circle cx=%2264%22 cy=%2230%22 r=%227%22 fill=%22%23ff2ed1%22/><circle cx=%2254%22 cy=%2262%22 r=%227%22 fill=%22%237b2ff7%22/><circle cx=%2274%22 cy=%2270%22 r=%227%22 fill=%22%235affc4%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 46ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">particle life <span>//</span> midnightbandy</div>
+<div class="hud desc">four neon species, each one pulled or pushed by the others under a rule nobody told them. no gravity, no flocking logic — just an attract/repel number per pair, and whatever forms, forms.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">move — disturb it · tap — reroll the rules</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const BASE = Math.min(W, H);
+  const K = BASE / 900; // tuning verified at a 900px minor axis
+
+  // --- species ---
+  const SPECIES = [
+    { color: '#00f0ff', glow: 'rgba(0,240,255,' },
+    { color: '#ff2ed1', glow: 'rgba(255,46,209,' },
+    { color: '#7b2ff7', glow: 'rgba(123,47,247,' },
+    { color: '#5affc4', glow: 'rgba(90,255,196,' },
+  ];
+  const S = SPECIES.length;
+
+  // --- particle-life force law ---
+  // u = dist / RMAX in (0,1]. Below BETA it is always repulsive (the core).
+  // Above BETA it ramps from 0 up to coeff at the midpoint, back to 0 at u=1.
+  const BETA = 0.3;
+  function forceFactor(u, coeff) {
+    if (u < BETA) return u / BETA - 1;
+    if (u < 1) return coeff * (1 - Math.abs(2 * u - 1 - BETA) / (1 - BETA));
+    return 0;
+  }
+
+  const RMAX = 72 * K;
+  const STRENGTH = 2600 * K;
+  const FRICTION = 0.55;   // velocity decay factor per second of elapsed time
+  const MAX_SPEED = 320 * K;
+  const MAX_DT = 1 / 30;
+
+  let matrix = [];
+  function rerollMatrix() {
+    matrix = [];
+    for (let i = 0; i < S; i++) {
+      const row = [];
+      for (let j = 0; j < S; j++) row.push(i === j ? rand(-0.3, 0.6) : rand(-1, 1));
+      matrix.push(row);
+    }
+  }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  rerollMatrix();
+
+  const N_PER_SPECIES = Math.round(170 * Math.min(2.2, (W * H) / (1600 * 900)) ) || 170;
+  const particles = [];
+  function seed() {
+    particles.length = 0;
+    for (let s = 0; s < S; s++) {
+      for (let i = 0; i < N_PER_SPECIES; i++) {
+        particles.push({
+          x: rand(0, W), y: rand(0, H),
+          vx: 0, vy: 0,
+          ax: 0, ay: 0,
+          s,
+        });
+      }
+    }
+  }
+  seed();
+
+  // --- spatial hash grid, cell size = interaction radius ---
+  function cellSize() { return RMAX; }
+  function buildGrid() {
+    const cell = cellSize();
+    const cols = Math.max(1, Math.ceil(W / cell));
+    const rows = Math.max(1, Math.ceil(H / cell));
+    const grid = new Map();
+    for (let idx = 0; idx < particles.length; idx++) {
+      const p = particles[idx];
+      const cx = ((Math.floor(p.x / cell) % cols) + cols) % cols;
+      const cy = ((Math.floor(p.y / cell) % rows) + rows) % rows;
+      const key = cx + ',' + cy;
+      let bucket = grid.get(key);
+      if (!bucket) { bucket = []; grid.set(key, bucket); }
+      bucket.push(idx);
+    }
+    return { grid, cols, rows, cell };
+  }
+
+  function torDelta(a, b, size) {
+    let d = a - b;
+    if (d > size / 2) d -= size;
+    else if (d < -size / 2) d += size;
+    return d;
+  }
+
+  const pointer = { x: -9999, y: -9999, active: false };
+  canvas.addEventListener('pointermove', (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+  canvas.addEventListener('pointerleave', () => { pointer.active = false; pointer.x = -9999; pointer.y = -9999; });
+  canvas.addEventListener('pointerdown', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true;
+    rerollMatrix();
+    flashUntil = performance.now() + 450;
+  });
+  canvas.addEventListener('pointerup', () => { pointer.active = false; });
+
+  let flashUntil = 0;
+  const POKE_RADIUS = 110 * K;
+  const POKE_STRENGTH = 1800 * K;
+
+  function step(dt) {
+    const { grid, cols, rows, cell } = buildGrid();
+    for (let idx = 0; idx < particles.length; idx++) {
+      const p = particles[idx];
+      const cx = ((Math.floor(p.x / cell) % cols) + cols) % cols;
+      const cy = ((Math.floor(p.y / cell) % rows) + rows) % rows;
+      let ax = 0, ay = 0;
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const nx = ((cx + ox) % cols + cols) % cols;
+          const ny = ((cy + oy) % rows + rows) % rows;
+          const bucket = grid.get(nx + ',' + ny);
+          if (!bucket) continue;
+          for (let k = 0; k < bucket.length; k++) {
+            const j = bucket[k];
+            if (j === idx) continue;
+            const q = particles[j];
+            const dx = torDelta(q.x, p.x, W);
+            const dy = torDelta(q.y, p.y, H);
+            const dist = Math.hypot(dx, dy);
+            if (dist < 1e-6 || dist > RMAX) continue;
+            const u = dist / RMAX;
+            const f = forceFactor(u, matrix[p.s][q.s]) * STRENGTH;
+            ax += (dx / dist) * f;
+            ay += (dy / dist) * f;
+          }
+        }
+      }
+      if (pointer.x > -1000) {
+        const dx = torDelta(p.x, pointer.x, W);
+        const dy = torDelta(p.y, pointer.y, H);
+        const d = Math.hypot(dx, dy);
+        if (d < POKE_RADIUS && d > 1e-6) {
+          const f = POKE_STRENGTH * (1 - d / POKE_RADIUS);
+          ax += (dx / d) * f;
+          ay += (dy / d) * f;
+        }
+      }
+      p.ax = ax; p.ay = ay;
+    }
+    const decay = Math.pow(FRICTION, dt);
+    for (const p of particles) {
+      p.px = p.x; p.py = p.y;
+      p.vx = (p.vx + p.ax * dt) * decay;
+      p.vy = (p.vy + p.ay * dt) * decay;
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > MAX_SPEED) {
+        const k = MAX_SPEED / sp;
+        p.vx *= k; p.vy *= k;
+      }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+
+      if (p.x < 0) { p.x += W; p.px += W; }
+      else if (p.x >= W) { p.x -= W; p.px -= W; }
+      if (p.y < 0) { p.y += H; p.py += H; }
+      else if (p.y >= H) { p.y -= H; p.py -= H; }
+    }
+  }
+
+  function draw() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,2,0.22)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let s = 0; s < S; s++) {
+      ctx.fillStyle = SPECIES[s].color;
+      for (const p of particles) {
+        if (p.s !== s) continue;
+        const sp = Math.hypot(p.vx, p.vy);
+        ctx.globalAlpha = Math.min(1, 0.5 + sp / MAX_SPEED);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.8 * K, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    if (performance.now() < flashUntil) {
+      ctx.globalCompositeOperation = 'source-over';
+      const t = 1 - (flashUntil - performance.now()) / 450;
+      ctx.strokeStyle = `rgba(123,47,247,${0.5 * (1 - t)})`;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(1, 1, W - 2, H - 2);
+    }
+
+    if (pointer.x > -1000) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = pointer.active ? 'rgba(0,240,255,0.5)' : 'rgba(0,240,255,0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, POKE_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  let last = performance.now();
+  let frame = 0;
+  function tick(now) {
+    const dt = Math.min(MAX_DT, Math.max(0, (now - last) / 1000));
+    last = now;
+    step(dt);
+    draw();
+    if (frame % 15 === 0) {
+      paramsEl.textContent = `species ${S}  n ${particles.length}\nrmax ${Math.round(RMAX)}  beta ${BETA}`;
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(tick); });
+})();
+</script>
+
+</body>
+</html>
