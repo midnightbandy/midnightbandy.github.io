@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>scatter — midnightbandy</title>
+<meta name="description" content="type anything. your words burst into neon glyphs and drift. wave the cursor through them, click to clear.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2214%22 y=%2268%22 font-family=%22monospace%22 font-size=%2258%22 font-weight=%22700%22 fill=%22%2300f0ff%22>a</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: text; }
+
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  #catcher {
+    position: fixed; inset: 0; z-index: 1;
+    opacity: 0; pointer-events: none;
+    width: 1px; height: 1px;
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 46ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .count { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<input id="catcher" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+
+<div class="hud title">scatter <span>//</span> midnightbandy</div>
+<div class="hud desc">type anything. every key becomes a glyph that bursts outward, drifts, and settles — until your cursor comes near and pushes it off course again.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">type to spawn · move to disturb · click to clear</div>
+<div class="hud count" id="count"></div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const catcher = document.getElementById('catcher');
+  const countEl = document.getElementById('count');
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const BASE = Math.min(W, H);
+  const K = BASE / 900; // tuning verified at a 900px minor axis
+
+  const PALETTE = ['#00f0ff', '#ff2ed1', '#7b2ff7', '#5affc4'];
+
+  const FONT_SIZE = 30 * K;
+  const MAX_GLYPHS = 240;
+  const FRICTION = 0.5;       // velocity decay factor per second of elapsed time
+  const MAX_SPEED = 420 * K;
+  const MAX_DT = 1 / 30;
+  const JITTER = 26 * K;      // ambient brownian accel, px/s^2 scale
+  const WALL_DAMPING = 0.55;
+  const POKE_RADIUS = 130 * K;
+  const POKE_STRENGTH = 5200 * K;
+  const BURST_SPEED = 180 * K;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  const glyphs = [];
+
+  function spawn(ch) {
+    if (ch === ' ') ch = '·';
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(BURST_SPEED * 0.3, BURST_SPEED);
+    glyphs.push({
+      ch,
+      x: W / 2 + rand(-20, 20),
+      y: H / 2 + rand(-20, 20),
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      hue: PALETTE[Math.floor(rand(0, PALETTE.length))],
+      rot: rand(-0.4, 0.4),
+      born: performance.now(),
+    });
+    if (glyphs.length > MAX_GLYPHS) glyphs.splice(0, glyphs.length - MAX_GLYPHS);
+  }
+
+  // --- physics step: pure enough to unit-test outside the DOM ---
+  // glyphs: array of {x,y,vx,vy}. pointer: {x,y,active}. consts above.
+  function stepGlyphs(list, pointer, w, h, dt) {
+    for (const g of list) {
+      let ax = (Math.random() - 0.5) * JITTER;
+      let ay = (Math.random() - 0.5) * JITTER;
+
+      if (pointer.active) {
+        const dx = g.x - pointer.x;
+        const dy = g.y - pointer.y;
+        const dist = Math.max(1e-3, Math.hypot(dx, dy));
+        if (dist < POKE_RADIUS) {
+          const f = POKE_STRENGTH * (1 - dist / POKE_RADIUS) * (1 - dist / POKE_RADIUS);
+          ax += (dx / dist) * f;
+          ay += (dy / dist) * f;
+        }
+      }
+
+      const decay = Math.pow(FRICTION, dt);
+      g.vx = (g.vx + ax * dt) * decay;
+      g.vy = (g.vy + ay * dt) * decay;
+
+      const sp = Math.hypot(g.vx, g.vy);
+      if (sp > MAX_SPEED) {
+        const k = MAX_SPEED / sp;
+        g.vx *= k; g.vy *= k;
+      }
+
+      g.x += g.vx * dt;
+      g.y += g.vy * dt;
+
+      const margin = FONT_SIZE * 0.6;
+      if (g.x < margin) { g.x = margin; g.vx = Math.abs(g.vx) * WALL_DAMPING; }
+      else if (g.x > w - margin) { g.x = w - margin; g.vx = -Math.abs(g.vx) * WALL_DAMPING; }
+      if (g.y < margin) { g.y = margin; g.vy = Math.abs(g.vy) * WALL_DAMPING; }
+      else if (g.y > h - margin) { g.y = h - margin; g.vy = -Math.abs(g.vy) * WALL_DAMPING; }
+    }
+  }
+
+  const pointer = { x: -9999, y: -9999, active: false };
+  window.addEventListener('pointermove', (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true;
+  });
+  window.addEventListener('pointerleave', () => { pointer.active = false; });
+  window.addEventListener('pointerdown', () => {
+    glyphs.length = 0;
+    catcher.focus();
+  });
+
+  // hidden input catches real keyboards (incl. mobile) via the 'input' event,
+  // which reports composed/backspaced text more reliably than raw keydown.
+  let prevValue = '';
+  catcher.addEventListener('input', () => {
+    const value = catcher.value;
+    if (value.length > prevValue.length) {
+      for (let i = prevValue.length; i < value.length; i++) spawn(value[i]);
+    }
+    prevValue = value;
+    if (value.length > 40) { catcher.value = ''; prevValue = ''; }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (document.activeElement !== catcher) catcher.focus();
+    if (e.key === 'Backspace' && catcher.value.length === 0 && glyphs.length) {
+      glyphs.pop();
+    }
+  });
+  catcher.focus();
+
+  function draw() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,2,0.2)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${FONT_SIZE}px 'JetBrains Mono', monospace`;
+    for (const g of glyphs) {
+      const age = Math.min(1, (performance.now() - g.born) / 220);
+      ctx.save();
+      ctx.translate(g.x, g.y);
+      ctx.rotate(g.rot * (1 - age));
+      ctx.globalAlpha = 0.25 + 0.75 * age;
+      ctx.shadowColor = g.hue;
+      ctx.shadowBlur = 16 * K;
+      ctx.fillStyle = g.hue;
+      ctx.fillText(g.ch, 0, 0);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    if (pointer.active) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = 'rgba(0,240,255,0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, POKE_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  let last = performance.now();
+  let frame = 0;
+  function tick(now) {
+    const dt = Math.min(MAX_DT, Math.max(0, (now - last) / 1000));
+    last = now;
+    stepGlyphs(glyphs, pointer, W, H, dt);
+    draw();
+    if (frame % 15 === 0) countEl.textContent = `glyphs ${glyphs.length}/${MAX_GLYPHS}`;
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(tick); });
+})();
+</script>
+
+</body>
+</html>
