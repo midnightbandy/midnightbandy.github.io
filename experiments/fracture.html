@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>fracture — midnightbandy</title>
+<meta name="description" content="a live Julia set, hand-rolled escape-time fractal. drag to pan, scroll to zoom, move to warp, click to reroll.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><circle cx=%2238%22 cy=%2250%22 r=%2224%22 fill=%22none%22 stroke=%22%23ff2ed1%22 stroke-width=%227%22/><circle cx=%2264%22 cy=%2250%22 r=%2213%22 fill=%22%2300f0ff%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; user-select: none; -webkit-tap-highlight-color: transparent; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.6) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #d7cfff;
+    text-shadow: 0 0 8px rgba(123,47,247,0.5);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #786c99; text-shadow: none; max-width: 42ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #786c99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #4d4466; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">julia <span>//</span> fracture</div>
+<div class="hud desc">z &rarr; z&sup2; + c, iterated until it escapes or doesn't. the boundary between the two is infinite — hand-rolled, no libraries.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">drag — pan · scroll — zoom · move — warp · click / tap / r — reroll</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0, img = null;
+
+  function resize() {
+    const targetW = Math.min(window.innerWidth, 520);
+    const scale = targetW / window.innerWidth;
+    W = Math.max(160, Math.round(window.innerWidth * scale));
+    H = Math.max(120, Math.round(window.innerHeight * scale));
+    canvas.width = W;
+    canvas.height = H;
+    img = ctx.createImageData(W, H);
+    for (let i = 3; i < img.data.length; i += 4) img.data[i] = 255; // fully opaque
+  }
+
+  // ---------- color LUT (smooth escape count -> neon gradient) ----------
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const stops = [
+    [0.00, hexToRgb('#000000')],
+    [0.12, hexToRgb('#0a0d3d')],
+    [0.30, hexToRgb('#5a2bd8')],
+    [0.52, hexToRgb('#ff2ed1')],
+    [0.74, hexToRgb('#00f0ff')],
+    [0.90, hexToRgb('#5affc4')],
+    [1.00, hexToRgb('#f5fff9')],
+  ];
+  const LUT = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let s0 = stops[0], s1 = stops[stops.length - 1];
+    for (let k = 0; k < stops.length - 1; k++) {
+      if (t >= stops[k][0] && t <= stops[k + 1][0]) { s0 = stops[k]; s1 = stops[k + 1]; break; }
+    }
+    const span = (s1[0] - s0[0]) || 1;
+    const lt = (t - s0[0]) / span;
+    for (let ch = 0; ch < 3; ch++) {
+      LUT[i * 3 + ch] = s0[1][ch] + (s1[1][ch] - s0[1][ch]) * lt;
+    }
+  }
+
+  // ---------- known-good Julia constants, each verified to carry a visible boundary ----------
+  // (classics: basilica at -1+0i, the real "Fibonacci" point at -0.618, San Marco at -0.75+0.11i, etc.)
+  const PRESETS = [
+    [-0.8, 0.156],
+    [-0.1, 0.651],
+    [-0.54, 0.54],
+    [-0.391, -0.587],
+    [-0.1226, 0.7449],
+    [-0.618, 0],
+    [-1, 0],
+    [-0.74543, 0.11301],
+  ];
+  let presetIdx = 0;
+  let baseCre = PRESETS[0][0], baseCim = PRESETS[0][1];
+
+  const DEFAULT_HALF_H = 1.5;
+  let centerRe = 0, centerIm = 0, viewHalfH = DEFAULT_HALF_H;
+  const ZOOM_MIN = 0.00002, ZOOM_MAX = 3;
+
+  function reroll() {
+    presetIdx = (presetIdx + 1 + ((Math.random() * (PRESETS.length - 1)) | 0)) % PRESETS.length;
+    baseCre = PRESETS[presetIdx][0];
+    baseCim = PRESETS[presetIdx][1];
+    centerRe = 0; centerIm = 0; viewHalfH = DEFAULT_HALF_H;
+  }
+
+  // ---------- pointer interaction ----------
+  let targetMX = 0.5, targetMY = 0.5;
+  let isDown = false, downAt = 0, downX = 0, downY = 0, lastX = 0, lastY = 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    isDown = true;
+    downAt = performance.now();
+    downX = lastX = e.clientX;
+    downY = lastY = e.clientY;
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    targetMX = e.clientX / window.innerWidth;
+    targetMY = e.clientY / window.innerHeight;
+    if (isDown) {
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      const viewHalfW = viewHalfH * (W / H);
+      centerRe -= dx / window.innerWidth * 2 * viewHalfW;
+      centerIm -= dy / window.innerHeight * 2 * viewHalfH;
+    }
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    isDown = false;
+    const dt = performance.now() - downAt;
+    const dist = Math.hypot(e.clientX - downX, e.clientY - downY);
+    if (dt < 300 && dist < 8) reroll();
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const nx = e.clientX / window.innerWidth, ny = e.clientY / window.innerHeight;
+    const viewHalfWBefore = viewHalfH * (W / H);
+    const beforeRe = centerRe + (nx - 0.5) * 2 * viewHalfWBefore;
+    const beforeIm = centerIm + (ny - 0.5) * 2 * viewHalfH;
+    const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    viewHalfH = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, viewHalfH * factor));
+    const viewHalfWAfter = viewHalfH * (W / H);
+    const afterRe = centerRe + (nx - 0.5) * 2 * viewHalfWAfter;
+    const afterIm = centerIm + (ny - 0.5) * 2 * viewHalfH;
+    centerRe += beforeRe - afterRe;
+    centerIm += beforeIm - afterIm;
+  }, { passive: false });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') reroll();
+  });
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- main loop ----------
+  let maxIter = 150;
+  const ITER_MIN = 40, ITER_MAX = 500;
+  let driftAngle = 0;
+  let lastTime = performance.now();
+  let lastParamUpdate = 0;
+
+  function frame() {
+    const t0 = performance.now();
+    const dtMs = t0 - lastTime;
+    lastTime = t0;
+    driftAngle += dtMs * 0.00025;
+
+    let cre = baseCre + Math.sin(driftAngle) * 0.05 + (targetMX - 0.5) * 0.22;
+    let cim = baseCim + Math.cos(driftAngle * 0.83) * 0.05 + (targetMY - 0.5) * 0.22;
+    const mag = Math.hypot(cre, cim);
+    if (mag > 1.4) { const s = 1.4 / mag; cre *= s; cim *= s; }
+
+    const viewHalfW = viewHalfH * (W / H);
+    const data = img.data;
+    let p = 0;
+    for (let py = 0; py < H; py++) {
+      const im0 = centerIm + (py / H - 0.5) * 2 * viewHalfH;
+      for (let px = 0; px < W; px++) {
+        const re0 = centerRe + (px / W - 0.5) * 2 * viewHalfW;
+        let zr = re0, zi = im0, n = 0, magSq = 0, escaped = false;
+        for (; n < maxIter; n++) {
+          const zr2 = zr * zr, zi2 = zi * zi;
+          magSq = zr2 + zi2;
+          if (magSq > 4) { escaped = true; break; }
+          zi = 2 * zr * zi + cim;
+          zr = zr2 - zi2 + cre;
+        }
+        let lutIdx = 0;
+        if (escaped) {
+          const nu = n + 1 - Math.log2(Math.log2(Math.sqrt(magSq)));
+          let t = Math.sqrt(Math.max(nu, 0) / maxIter);
+          if (t > 1) t = 1;
+          lutIdx = (t * 255) | 0;
+        }
+        data[p] = LUT[lutIdx * 3];
+        data[p + 1] = LUT[lutIdx * 3 + 1];
+        data[p + 2] = LUT[lutIdx * 3 + 2];
+        p += 4;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    const frameDt = performance.now() - t0;
+    if (frameDt > 22 && maxIter > ITER_MIN) maxIter = Math.max(ITER_MIN, Math.round(maxIter * 0.85));
+    else if (frameDt < 12 && maxIter < ITER_MAX) maxIter = Math.min(ITER_MAX, Math.round(maxIter * 1.05));
+
+    const now = performance.now();
+    if (now - lastParamUpdate > 150) {
+      lastParamUpdate = now;
+      const sign = cim >= 0 ? '+' : '-';
+      paramsEl.textContent =
+        'c  ' + cre.toFixed(4) + sign + Math.abs(cim).toFixed(4) + 'i\n' +
+        'zoom  x' + (DEFAULT_HALF_H / viewHalfH).toFixed(1) + '\n' +
+        'iter  ' + maxIter;
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
