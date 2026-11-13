@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>gridlock — midnightbandy</title>
+<meta name="description" content="a hand-rolled light-cycle duel against a flood-fill ai. lay trail, never cross it, box the other one in first.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><path d=%22M15 70 L15 30 L50 30%22 fill=%22none%22 stroke=%22%2300f0ff%22 stroke-width=%228%22/><path d=%22M85 30 L85 70 L50 70%22 fill=%22none%22 stroke=%22%23ff2ed1%22 stroke-width=%228%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 46ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+
+  #status {
+    position: fixed;
+    z-index: 6;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: clamp(13px, 2.4vw, 16px);
+    letter-spacing: 0.04em;
+    text-align: center;
+    color: #e8fbff;
+    text-shadow: 0 0 14px rgba(0,240,255,0.6);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #status.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">gridlock <span>//</span> midnightbandy</div>
+<div class="hud desc">a light-cycle duel, hand-rolled. you lay cyan trail, the handler lays magenta. it doesn't chase you — it just floods every branch to see which one leaves it the most room, and takes that one. cross any wall, yours or its, and you're done.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">arrows / wasd — steer · swipe — steer · space — re-run</div>
+<div class="hud params" id="params"></div>
+<div id="status"></div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const trail = document.createElement('canvas');
+  const tctx = trail.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0, CELL = 16, COLS = 0, ROWS = 0;
+  let grid, player, ai, gameOver, winner, ticks, tickMs, lastTick;
+
+  function idx(x, y) { return y * COLS + x; }
+  function inBounds(x, y) { return x >= 0 && y >= 0 && x < COLS && y < ROWS; }
+  function rotA(d) { return { x: -d.y, y: d.x }; }
+  function rotB(d) { return { x: d.y, y: -d.x }; }
+
+  function sizeCanvas() {
+    W = canvas.width = trail.width = window.innerWidth;
+    H = canvas.height = trail.height = window.innerHeight;
+    CELL = Math.max(10, Math.min(22, Math.floor(Math.min(W, H) / 42)));
+    COLS = Math.max(20, Math.floor(W / CELL));
+    ROWS = Math.max(14, Math.floor(H / CELL));
+  }
+
+  function paintCell(x, y, who) {
+    tctx.save();
+    tctx.shadowBlur = CELL * 1.1;
+    tctx.shadowColor = `rgba(${who.glow},0.9)`;
+    tctx.fillStyle = who.color;
+    tctx.fillRect(x * CELL, y * CELL, CELL - 1, CELL - 1);
+    tctx.restore();
+  }
+
+  // --- flood-fill: how much empty space is reachable from (sx,sy), capped ---
+  const FLOOD_CAP = 500;
+  function floodFillSize(sx, sy, cap) {
+    if (!inBounds(sx, sy) || grid[idx(sx, sy)] !== 0) return 0;
+    const visited = new Uint8Array(COLS * ROWS);
+    const qx = new Int32Array(cap + 4);
+    const qy = new Int32Array(cap + 4);
+    let head = 0, tail = 0;
+    qx[tail] = sx; qy[tail] = sy; tail++;
+    visited[idx(sx, sy)] = 1;
+    let count = 0;
+    while (head < tail && count < cap) {
+      const x = qx[head], y = qy[head]; head++;
+      count++;
+      const nbrs = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]];
+      for (const [nx, ny] of nbrs) {
+        if (!inBounds(nx, ny)) continue;
+        const ii = idx(nx, ny);
+        if (visited[ii]) continue;
+        if (grid[ii] !== 0) continue;
+        visited[ii] = 1;
+        if (tail < qx.length) { qx[tail] = nx; qy[tail] = ny; tail++; }
+      }
+    }
+    return count;
+  }
+
+  // --- ai: straight / turnA / turnB, pick whichever leaves the most reachable room ---
+  function decideAI() {
+    const d = ai.dir;
+    const candidates = [d, rotA(d), rotB(d)];
+    let best = null, bestScore = -1;
+    for (const c of candidates) {
+      const nx = ai.x + c.x, ny = ai.y + c.y;
+      if (!inBounds(nx, ny) || grid[idx(nx, ny)] !== 0) continue;
+      const score = floodFillSize(nx, ny, FLOOD_CAP);
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    return best || d; // boxed in on all three sides: go straight anyway, it's over
+  }
+
+  function resetGame() {
+    sizeCanvas();
+    grid = new Uint8Array(COLS * ROWS);
+    tctx.clearRect(0, 0, W, H);
+    player = { x: Math.floor(COLS * 0.25), y: Math.floor(ROWS / 2), dir: { x: 1, y: 0 }, pending: null, color: '#00f0ff', glow: '0,240,255' };
+    ai = { x: Math.floor(COLS * 0.75), y: Math.floor(ROWS / 2), dir: { x: -1, y: 0 }, color: '#ff2ed1', glow: '255,46,209' };
+    grid[idx(player.x, player.y)] = 1;
+    grid[idx(ai.x, ai.y)] = 2;
+    paintCell(player.x, player.y, player);
+    paintCell(ai.x, ai.y, ai);
+    gameOver = false;
+    winner = null;
+    ticks = 0;
+    tickMs = 95;
+    lastTick = performance.now();
+    statusEl.classList.remove('show');
+  }
+
+  function step() {
+    if (gameOver) return;
+    let dir = player.dir;
+    if (player.pending && !(player.pending.x === -dir.x && player.pending.y === -dir.y)) {
+      dir = player.pending;
+    }
+    player.pending = null;
+
+    const aiDir = decideAI();
+
+    const pNext = { x: player.x + dir.x, y: player.y + dir.y };
+    const aNext = { x: ai.x + aiDir.x, y: ai.y + aiDir.y };
+
+    let pCrash = !inBounds(pNext.x, pNext.y) || grid[idx(pNext.x, pNext.y)] !== 0;
+    let aCrash = !inBounds(aNext.x, aNext.y) || grid[idx(aNext.x, aNext.y)] !== 0;
+    if (!pCrash && !aCrash && pNext.x === aNext.x && pNext.y === aNext.y) { pCrash = true; aCrash = true; }
+
+    if (pCrash || aCrash) {
+      gameOver = true;
+      winner = (pCrash && aCrash) ? 'draw' : (pCrash ? 'ai' : 'player');
+      showStatus();
+      return;
+    }
+
+    grid[idx(pNext.x, pNext.y)] = 1;
+    grid[idx(aNext.x, aNext.y)] = 2;
+    paintCell(pNext.x, pNext.y, player);
+    paintCell(aNext.x, aNext.y, ai);
+    player.x = pNext.x; player.y = pNext.y; player.dir = dir;
+    ai.x = aNext.x; ai.y = aNext.y; ai.dir = aiDir;
+    ticks++;
+    if (ticks % 40 === 0) tickMs = Math.max(48, tickMs - 4);
+  }
+
+  function showStatus() {
+    const msg = winner === 'draw' ? 'DRAW — you cut each other off'
+      : winner === 'player' ? 'YOU WIN — the handler ran out of grid'
+      : 'YOU CRASHED — the handler boxed you in';
+    statusEl.textContent = msg + '   ·   space / tap to re-run';
+    statusEl.classList.add('show');
+  }
+
+  // --- input ---
+  const KEY_DIR = {
+    ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 }, ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
+    w: { x: 0, y: -1 }, s: { x: 0, y: 1 }, a: { x: -1, y: 0 }, d: { x: 1, y: 0 },
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === ' ') { e.preventDefault(); if (gameOver) resetGame(); return; }
+    const d = KEY_DIR[e.key];
+    if (d) { player.pending = d; e.preventDefault(); }
+  }, { passive: false });
+
+  let touchStart = null;
+  canvas.addEventListener('pointerdown', (e) => { touchStart = { x: e.clientX, y: e.clientY }; });
+  canvas.addEventListener('pointerup', (e) => {
+    if (gameOver) { resetGame(); return; }
+    if (!touchStart) return;
+    const dx = e.clientX - touchStart.x, dy = e.clientY - touchStart.y;
+    touchStart = null;
+    if (Math.hypot(dx, dy) < 18) return;
+    player.pending = Math.abs(dx) > Math.abs(dy) ? { x: dx > 0 ? 1 : -1, y: 0 } : { x: 0, y: dy > 0 ? 1 : -1 };
+  });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resetGame, 150);
+  });
+
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(trail, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  let frame = 0;
+  function loop(now) {
+    if (!gameOver) {
+      let guard = 0;
+      while (!gameOver && now - lastTick >= tickMs && guard < 30) {
+        step();
+        lastTick += tickMs;
+        guard++;
+      }
+      if (guard >= 30) lastTick = now;
+    }
+    draw();
+    if (frame % 10 === 0) {
+      paramsEl.textContent = `grid ${COLS}x${ROWS}  tick ${tickMs}ms\nticks ${ticks}`;
+    }
+    frame++;
+    requestAnimationFrame(loop);
+  }
+
+  resetGame();
+  requestAnimationFrame((t) => { lastTick = t; requestAnimationFrame(loop); });
+})();
+</script>
+
+</body>
+</html>
