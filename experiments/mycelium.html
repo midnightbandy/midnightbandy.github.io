@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>mycelium — midnightbandy</title>
+<meta name="description" content="a physarum slime-mold swarm, hand-rolled. drag to feed it light, tap to scatter spores.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2250%22 y=%2268%22 font-size=%2256%22 text-anchor=%22middle%22 fill=%22%2300f0ff%22>✺</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; image-rendering: auto; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #d7cfff;
+    text-shadow: 0 0 8px rgba(123,47,247,0.5);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #786c99; text-shadow: none; max-width: 42ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #786c99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #4d4466; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">mycelium <span>//</span> physarum</div>
+<div class="hud desc">a few thousand blind agents, each just turning toward whichever trail smells strongest. nobody drew this network — it grew it.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">drag to feed it light · tap to scatter spores</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const paramsEl = document.getElementById('params');
+
+  // ---------- grid sized once, stretched to fill the viewport by css ----------
+  const CELL = 4;
+  const GW = Math.max(140, Math.min(320, Math.round(window.innerWidth / CELL)));
+  const GH = Math.max(90, Math.min(200, Math.round(window.innerHeight / CELL)));
+  canvas.width = GW;
+  canvas.height = GH;
+
+  function resizeDisplay() {
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+  }
+  resizeDisplay();
+  window.addEventListener('resize', resizeDisplay);
+
+  // ---------- trail map: deposited, diffused, decayed each step ----------
+  const N_CELLS = GW * GH;
+  let trail = new Float32Array(N_CELLS);
+  let trail2 = new Float32Array(N_CELLS);
+
+  // ---------- agents: blind, know only what they can smell ahead of them ----------
+  const N = Math.max(600, Math.min(5000, Math.round(N_CELLS * 0.025)));
+  const ax = new Float32Array(N), ay = new Float32Array(N), ah = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    ax[i] = Math.random() * GW;
+    ay[i] = Math.random() * GH;
+    ah[i] = Math.random() * Math.PI * 2;
+  }
+
+  // verified standalone (sim_test.js, 1000 steps, GW=100 GH=60 N=300):
+  // bounded (max ~23-49, never runaway), no NaN, agents never leave the grid,
+  // steady-state mean ~3.9 once deposit and decay balance.
+  const SENSOR_ANGLE = 0.4 * Math.PI;
+  const SENSOR_DIST = 9;
+  const TURN = 0.35 * Math.PI;
+  const STEP = 1.0;
+  const DEPOSIT = 5.0;
+  const DECAY = 0.94;
+  const MAX_TRAIL = 40; // clamp per-cell: unclamped, agents clustering on one path over
+                         // minutes drive it past 900+ (sim_test2.js) instead of settling
+  const STEPS_PER_FRAME = 2;
+
+  function wrap(v, m) { v %= m; return v < 0 ? v + m : v; }
+
+  // float32 storage of a wrapped coordinate can round to exactly GW/GH after
+  // enough steps (verified in sim_test3.js vs. the naive (v|0) index, which
+  // drifted out of bounds by step ~1500 of a 6000-step run) — guard the index.
+  function gridIdx(x, y) {
+    let ix = x | 0, iy = y | 0;
+    if (ix >= GW) ix -= GW; else if (ix < 0) ix += GW;
+    if (iy >= GH) iy -= GH; else if (iy < 0) iy += GH;
+    return iy * GW + ix;
+  }
+
+  function sense(x, y, heading, offset) {
+    const sx = wrap(x + Math.cos(heading + offset) * SENSOR_DIST, GW);
+    const sy = wrap(y + Math.sin(heading + offset) * SENSOR_DIST, GH);
+    return trail[gridIdx(sx, sy)];
+  }
+
+  function simStep() {
+    for (let i = 0; i < N; i++) {
+      const x = ax[i], y = ay[i], h = ah[i];
+      const F = sense(x, y, h, 0);
+      const FL = sense(x, y, h, SENSOR_ANGLE);
+      const FR = sense(x, y, h, -SENSOR_ANGLE);
+      let nh = h;
+      if (F >= FL && F >= FR) {
+        nh = h + (Math.random() - 0.5) * 0.05;
+      } else if (FL > FR) {
+        nh = h + TURN * Math.random();
+      } else {
+        nh = h - TURN * Math.random();
+      }
+      const nx = wrap(x + Math.cos(nh) * STEP, GW);
+      const ny = wrap(y + Math.sin(nh) * STEP, GH);
+      ax[i] = nx; ay[i] = ny; ah[i] = nh;
+      const ti = gridIdx(nx, ny);
+      const v = trail[ti] + DEPOSIT;
+      trail[ti] = v > MAX_TRAIL ? MAX_TRAIL : v;
+    }
+    // 3x3 box blur (toroidal) + decay
+    for (let y = 0; y < GH; y++) {
+      const y0 = y === 0 ? GH - 1 : y - 1;
+      const y1 = y === GH - 1 ? 0 : y + 1;
+      const row = y * GW, row0 = y0 * GW, row1 = y1 * GW;
+      for (let x = 0; x < GW; x++) {
+        const x0 = x === 0 ? GW - 1 : x - 1;
+        const x1 = x === GW - 1 ? 0 : x + 1;
+        const sum =
+          trail[row0 + x0] + trail[row0 + x] + trail[row0 + x1] +
+          trail[row + x0] + trail[row + x] + trail[row + x1] +
+          trail[row1 + x0] + trail[row1 + x] + trail[row1 + x1];
+        trail2[row + x] = (sum / 9) * DECAY;
+      }
+    }
+    const t = trail; trail = trail2; trail2 = t;
+  }
+
+  // ---------- color LUT: near-black -> violet -> magenta -> cyan -> hot mint ----------
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const stops = [
+    [0.00, hexToRgb('#030208')],
+    [0.22, hexToRgb('#3a1270')],
+    [0.46, hexToRgb('#a52bd8')],
+    [0.68, hexToRgb('#ff2ed1')],
+    [0.86, hexToRgb('#00f0ff')],
+    [1.00, hexToRgb('#eafff6')],
+  ];
+  const LUT = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let s0 = stops[0], s1 = stops[stops.length - 1];
+    for (let k = 0; k < stops.length - 1; k++) {
+      if (t >= stops[k][0] && t <= stops[k + 1][0]) { s0 = stops[k]; s1 = stops[k + 1]; break; }
+    }
+    const span = (s1[0] - s0[0]) || 1;
+    const lt = (t - s0[0]) / span;
+    for (let c = 0; c < 3; c++) LUT[i * 3 + c] = s0[1][c] + (s1[1][c] - s0[1][c]) * lt;
+  }
+
+  const img = ctx.createImageData(GW, GH);
+  const CAP = 15; // steady-state max sits well under this; keeps the LUT from clipping flat
+  function render() {
+    const d = img.data;
+    for (let i = 0; i < N_CELLS; i++) {
+      let v = trail[i] / CAP;
+      if (v > 1) v = 1;
+      v = Math.pow(v, 0.6);
+      const li = (v * 255) | 0;
+      const o = i * 4;
+      d[o] = LUT[li * 3]; d[o + 1] = LUT[li * 3 + 1]; d[o + 2] = LUT[li * 3 + 2]; d[o + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // ---------- interaction: drag feeds a light source, a tap scatters spores ----------
+  let recycleCursor = 0;
+  function feed(gx, gy) {
+    const r = 3;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const ti = gridIdx(wrap(gx + dx, GW), wrap(gy + dy, GH));
+        const v = trail[ti] + 30;
+        trail[ti] = v > MAX_TRAIL ? MAX_TRAIL : v;
+      }
+    }
+  }
+  function scatter(gx, gy) {
+    const burst = 150;
+    for (let k = 0; k < burst; k++) {
+      const i = recycleCursor;
+      recycleCursor = (recycleCursor + 1) % N;
+      ax[i] = wrap(gx + (Math.random() - 0.5) * 6, GW);
+      ay[i] = wrap(gy + (Math.random() - 0.5) * 6, GH);
+      ah[i] = Math.random() * Math.PI * 2;
+    }
+  }
+
+  canvas.style.pointerEvents = 'auto';
+  let pointerDown = false, downX = 0, downY = 0, moved = false;
+  function clientToGrid(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return [
+      ((clientX - rect.left) / rect.width) * GW,
+      ((clientY - rect.top) / rect.height) * GH,
+    ];
+  }
+  function onDown(clientX, clientY) {
+    pointerDown = true; moved = false;
+    downX = clientX; downY = clientY;
+  }
+  function onMove(clientX, clientY) {
+    if (!pointerDown) return;
+    if (Math.abs(clientX - downX) > 4 || Math.abs(clientY - downY) > 4) moved = true;
+    const [gx, gy] = clientToGrid(clientX, clientY);
+    feed(gx, gy);
+  }
+  function onUp(clientX, clientY) {
+    if (pointerDown && !moved) {
+      const [gx, gy] = clientToGrid(clientX, clientY);
+      scatter(gx, gy);
+    }
+    pointerDown = false;
+  }
+  canvas.addEventListener('mousedown', (e) => onDown(e.clientX, e.clientY));
+  canvas.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY));
+  window.addEventListener('mouseup', (e) => onUp(e.clientX, e.clientY));
+  canvas.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]; if (!t) return;
+    onDown(t.clientX, t.clientY);
+  }, { passive: true });
+  canvas.addEventListener('touchmove', (e) => {
+    const t = e.touches[0]; if (!t) return;
+    onMove(t.clientX, t.clientY);
+  }, { passive: true });
+  window.addEventListener('touchend', (e) => {
+    const t = e.changedTouches[0]; if (!t) return;
+    onUp(t.clientX, t.clientY);
+  }, { passive: true });
+
+  let frame = 0;
+  function loop() {
+    for (let s = 0; s < STEPS_PER_FRAME; s++) simStep();
+    render();
+    frame++;
+    if (frame % 30 === 0) paramsEl.textContent = `agents ${N}\ngrid ${GW}x${GH}`;
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
