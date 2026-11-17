@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>weft — midnightbandy</title>
+<meta name="description" content="a hand-rolled verlet cloth, pinned at the top. drag a thread, swipe to cut it, tap to reweave.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><path d=%22M10 20 L90 20 M10 20 L18 90 M50 20 L45 90 M90 20 L82 90%22 stroke=%22%2300f0ff%22 stroke-width=%223%22 fill=%22none%22/><path d=%22M18 90 L45 90 L82 90%22 stroke=%22%23ff2ed1%22 stroke-width=%223%22 fill=%22none%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #d7cfff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #786c99; text-shadow: none; max-width: 42ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #786c99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #4d4466; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">neon cloth <span>//</span> weft</div>
+<div class="hud desc">a grid of threads, pinned along the top, falling under hand-rolled verlet physics. pull it, cut it, watch gravity finish the job.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">drag a thread to pull · swipe through it to cut · tap / click / r — reweave</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0;
+
+  // ---------- verlet cloth: points + distance constraints, Jakobsen-style relaxation ----------
+  const GRAVITY = 420;       // px/s^2
+  const DAMPING = 0.985;     // velocity retained per step
+  const CONSTRAINT_ITER = 6; // relaxation passes per frame
+  const BREAK_MULT = 1.9;    // a thread snaps past this multiple of its rest length
+  const SPACING = 30;        // target px between neighboring points
+  const SUBSTEP_DT = 1 / 120;
+  const MAX_SUBSTEPS = 4;
+
+  let cloth = null;
+
+  function buildCloth() {
+    const cols = Math.max(6, Math.round(W / SPACING));
+    const rows = Math.max(5, Math.round((H * 0.85) / SPACING));
+    const gw = cols * SPACING;
+    const originX = (W - gw) / 2;
+    const originY = H * 0.1;
+
+    const points = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = originX + c * SPACING;
+        const y = originY + r * SPACING;
+        points.push({
+          x, y, px: x, py: y,
+          pinned: r === 0 && (c % 3 === 0),
+          hue: c / cols,
+        });
+      }
+    }
+
+    const idx = (c, r) => r * cols + c;
+    const constraints = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (c < cols - 1) constraints.push(makeConstraint(points, idx(c, r), idx(c + 1, r)));
+        if (r < rows - 1) constraints.push(makeConstraint(points, idx(c, r), idx(c, r + 1)));
+      }
+    }
+    return { points, constraints, cols, rows };
+  }
+
+  function makeConstraint(points, ia, ib) {
+    const a = points[ia], b = points[ib];
+    const rest = Math.hypot(a.x - b.x, a.y - b.y);
+    return { ia, ib, rest, broken: false };
+  }
+
+  function step(cloth, windX, dt) {
+    const { points, constraints } = cloth;
+    for (const p of points) {
+      if (p.pinned) continue;
+      const vx = (p.x - p.px) * DAMPING;
+      const vy = (p.y - p.py) * DAMPING;
+      p.px = p.x; p.py = p.y;
+      p.x += vx + windX * dt * dt;
+      p.y += vy + GRAVITY * dt * dt;
+    }
+    for (let iter = 0; iter < CONSTRAINT_ITER; iter++) {
+      for (const k of constraints) {
+        if (k.broken) continue;
+        const a = points[k.ia], b = points[k.ib];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.max(Math.hypot(dx, dy), 1e-6);
+        if (dist > k.rest * BREAK_MULT) { k.broken = true; continue; }
+        const diff = (dist - k.rest) / dist;
+        const ox = dx * 0.5 * diff, oy = dy * 0.5 * diff;
+        if (!a.pinned) { a.x += ox; a.y += oy; }
+        if (!b.pinned) { b.x -= ox; b.y -= oy; }
+      }
+    }
+  }
+
+  function segIntersect(p1, p2, p3, p4) {
+    const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+    const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+    const denom = d1x * d2y - d1y * d2x;
+    if (Math.abs(denom) < 1e-9) return false;
+    const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+    const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  }
+
+  function cutNear(cloth, from, to) {
+    let cut = 0;
+    for (const k of cloth.constraints) {
+      if (k.broken) continue;
+      const a = cloth.points[k.ia], b = cloth.points[k.ib];
+      if (segIntersect(from, to, a, b)) { k.broken = true; cut++; }
+    }
+    return cut;
+  }
+
+  function nearestPoint(cloth, x, y, maxDist) {
+    let best = null, bestD = maxDist * maxDist;
+    for (const p of cloth.points) {
+      if (p.pinned) continue;
+      const dx = p.x - x, dy = p.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD) { bestD = d2; best = p; }
+    }
+    return best;
+  }
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cloth = buildCloth();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------- pointer: grab a nearby thread to drag it, otherwise swipe to cut ----------
+  const GRAB_RADIUS = SPACING * 0.65;
+  let grabbed = null;
+  let cutting = false;
+  let lastX = 0, lastY = 0;
+  let downAt = 0, downX = 0, downY = 0;
+  let totalCuts = 0;
+
+  function toLocal(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const { x, y } = toLocal(e);
+    downAt = performance.now(); downX = x; downY = y;
+    lastX = x; lastY = y;
+    const p = nearestPoint(cloth, x, y, GRAB_RADIUS);
+    if (p) { grabbed = p; cutting = false; }
+    else { grabbed = null; cutting = true; }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const { x, y } = toLocal(e);
+    if (grabbed) {
+      grabbed.x = x; grabbed.y = y;
+      grabbed.px = lastX; grabbed.py = lastY; // carries swipe velocity into a fling on release
+    } else if (cutting) {
+      totalCuts += cutNear(cloth, { x: lastX, y: lastY }, { x, y });
+    }
+    lastX = x; lastY = y;
+  });
+
+  window.addEventListener('pointerup', (e) => {
+    const { x, y } = toLocal(e);
+    const dt = performance.now() - downAt;
+    const dist = Math.hypot(x - downX, y - downY);
+    if (!grabbed && dt < 250 && dist < 8) reweave();
+    grabbed = null;
+    cutting = false;
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') reweave();
+  });
+  window.addEventListener('resize', resize);
+
+  function reweave() {
+    cloth = buildCloth();
+    grabbed = null;
+    totalCuts = 0;
+  }
+
+  resize();
+
+  // ---------- render ----------
+  function colorFor(hue, stretch) {
+    // slack threads read cyan/violet across the grid; a thread nearing its break point flares magenta/white
+    const h = 185 + hue * 70;
+    const flare = Math.min(1, Math.max(0, (stretch - 1) / (BREAK_MULT - 1)));
+    const l = 55 + flare * 30;
+    const s = 90;
+    const hue2 = h - flare * 100;
+    return `hsl(${hue2}, ${s}%, ${l}%)`;
+  }
+
+  let lastT = performance.now();
+  let lastParamUpdate = 0;
+  let windPhase = 0;
+
+  function frame(now) {
+    let dt = (now - lastT) / 1000;
+    lastT = now;
+    if (dt > 0.1) dt = 0.1;
+    windPhase += dt;
+    const windX = Math.sin(windPhase * 0.6) * 160 + Math.sin(windPhase * 1.7) * 40;
+
+    const steps = Math.min(MAX_SUBSTEPS, Math.max(1, Math.round(dt / SUBSTEP_DT)));
+    for (let s = 0; s < steps; s++) step(cloth, windX, SUBSTEP_DT);
+
+    ctx.fillStyle = 'rgba(0,0,2,0.22)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    let active = 0;
+    for (const k of cloth.constraints) {
+      if (k.broken) continue;
+      active++;
+      const a = cloth.points[k.ia], b = cloth.points[k.ib];
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const stretch = dist / k.rest;
+      ctx.strokeStyle = colorFor((a.hue + b.hue) * 0.5, stretch);
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    for (const p of cloth.points) {
+      if (!p.pinned) continue;
+      ctx.fillStyle = '#786c99';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (now - lastParamUpdate > 150) {
+      lastParamUpdate = now;
+      paramsEl.textContent =
+        'wind    ' + windX.toFixed(0).padStart(5) + '\n' +
+        'threads ' + String(active).padStart(5) + ' / ' + cloth.constraints.length + '\n' +
+        'cut     ' + String(totalCuts).padStart(5);
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
