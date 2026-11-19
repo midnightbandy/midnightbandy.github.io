@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>harmonograph — midnightbandy</title>
+<meta name="description" content="a hand-rolled harmonograph: four damped sine pairs driving a pen that never quite repeats. move to detune, click to reroll.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><circle cx=%2250%22 cy=%2250%22 r=%2230%22 stroke=%22%2300f0ff%22 stroke-width=%223%22 fill=%22none%22/><circle cx=%2250%22 cy=%2250%22 r=%2214%22 stroke=%22%23ff2ed1%22 stroke-width=%223%22 fill=%22none%22/></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #d7cfff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #786c99; text-shadow: none; max-width: 42ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #786c99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #4d4466; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">harmonograph <span>//</span> midnightbandy</div>
+<div class="hud desc">a pen driven by four damped, breathing sine waves, like a pair of coupled pendulums tracing sand. it slowly precesses — nothing ever quite closes the loop.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">move to detune · click / tap / r — reroll</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const paramsEl = document.getElementById('params');
+
+  let W = 0, H = 0;
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // --- pure math: no DOM/canvas references below this line, so it can be
+  // lifted verbatim into a Node harness and checked for NaN/bounds. ---
+
+  function hash(i) {
+    const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  function makeParams(seed) {
+    // frequencies as small integers so the curve stays quasi-periodic, not noise
+    const f1 = 2 + Math.floor(hash(seed + 1) * 5);
+    const f2 = 2 + Math.floor(hash(seed + 2) * 5);
+    const f3 = 2 + Math.floor(hash(seed + 3) * 5);
+    const f4 = 2 + Math.floor(hash(seed + 4) * 5);
+    const p1 = hash(seed + 5) * Math.PI * 2;
+    const p2 = hash(seed + 6) * Math.PI * 2;
+    const p3 = hash(seed + 7) * Math.PI * 2;
+    const p4 = hash(seed + 8) * Math.PI * 2;
+    // tiny detune so the rosette slowly precesses instead of locking into a static loop
+    const det1 = (hash(seed + 9) - 0.5) * 0.004;
+    const det2 = (hash(seed + 10) - 0.5) * 0.004;
+    return { f1, f2, f3, f4, p1, p2, p3, p4, det1, det2 };
+  }
+
+  // smooth envelope in [breathMin, 1], period breathPeriod seconds of sim time
+  function breathe(t, breathPeriod, breathMin) {
+    const s = (Math.sin((t / breathPeriod) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+    return breathMin + (1 - breathMin) * s;
+  }
+
+  // detuneMix in [-1,1] nudges f1/f2 for a live "drag to detune" feel
+  function pointAt(t, params, detuneMix) {
+    const { f1, f2, f3, f4, p1, p2, p3, p4, det1, det2 } = params;
+    const d = detuneMix * 0.6;
+    const env = breathe(t, 23000, 0.12);
+    const x = env * (
+      Math.sin((f1 + det1 * t + d) * t * 0.001 + p1) * 0.55 +
+      Math.sin((f2 + det2 * t) * t * 0.001 + p2) * 0.45
+    );
+    const y = env * (
+      Math.sin((f3 - det2 * t) * t * 0.001 + p3) * 0.55 +
+      Math.sin((f4 - det1 * t - d) * t * 0.001 + p4) * 0.45
+    );
+    return [x, y];
+  }
+
+  // ---------- color: lerp around the neon palette ----------
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const PALETTE = ['#00f0ff', '#7b2ff7', '#ff2ed1', '#00ffa3'].map(hexToRgb);
+  function paletteColor(t) {
+    const n = PALETTE.length;
+    const f = ((t % 1) + 1) % 1 * n;
+    const i0 = Math.floor(f) % n;
+    const i1 = (i0 + 1) % n;
+    const lt = f - Math.floor(f);
+    const a = PALETTE[i0], b = PALETTE[i1];
+    return [
+      a[0] + (b[0] - a[0]) * lt,
+      a[1] + (b[1] - a[1]) * lt,
+      a[2] + (b[2] - a[2]) * lt,
+    ];
+  }
+
+  // ---------- state ----------
+  let params = makeParams(Date.now() % 100000);
+  let simT = 0;
+  let hue = 0;
+  let detuneMix = 0, targetDetune = 0;
+  let px = null, py = null;
+  let seedCount = 0;
+
+  function reroll() {
+    params = makeParams((Date.now() + seedCount * 977) % 100000);
+    seedCount++;
+    simT = 0;
+    px = py = null;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------- pointer interaction ----------
+  let downAt = 0, downX = 0, downY = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    downAt = performance.now();
+    downX = e.clientX; downY = e.clientY;
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    const dt = performance.now() - downAt;
+    const dist = Math.hypot(e.clientX - downX, e.clientY - downY);
+    if (dt < 300 && dist < 8) reroll();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    targetDetune = (e.clientX / window.innerWidth) * 2 - 1;
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') reroll();
+  });
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- main loop ----------
+  const SUBSTEPS = 8;
+  const SIM_MS_PER_FRAME = 90; // sim-time advance per real frame, independent of refresh rate
+  let lastParamUpdate = 0;
+
+  function frame() {
+    detuneMix += (targetDetune - detuneMix) * 0.04;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.035)';
+    ctx.fillRect(0, 0, W, H);
+
+    const radius = Math.min(W, H) * 0.42;
+    const cx = W / 2, cy = H / 2;
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    let lastX = px, lastY = py;
+    const stepMs = SIM_MS_PER_FRAME / SUBSTEPS;
+    for (let i = 0; i < SUBSTEPS; i++) {
+      simT += stepMs;
+      const [nx, ny] = pointAt(simT, params, detuneMix);
+      const sx = cx + nx * radius;
+      const sy = cy + ny * radius;
+      if (lastX !== null) {
+        hue += 0.0012 * stepMs;
+        const [r, g, b] = paletteColor(hue);
+        ctx.strokeStyle = `rgba(${r | 0},${g | 0},${b | 0},0.85)`;
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(sx, sy);
+        ctx.stroke();
+      }
+      lastX = sx; lastY = sy;
+    }
+    px = lastX; py = lastY;
+
+    // glowing pen tip
+    const [tr, tg, tb] = paletteColor(hue);
+    ctx.shadowColor = `rgb(${tr | 0},${tg | 0},${tb | 0})`;
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = `rgb(${tr | 0},${tg | 0},${tb | 0})`;
+    ctx.beginPath();
+    ctx.arc(px, py, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalCompositeOperation = 'source-over';
+
+    const now = performance.now();
+    if (now - lastParamUpdate > 150) {
+      lastParamUpdate = now;
+      paramsEl.textContent =
+        'f ' + params.f1 + ' ' + params.f2 + ' ' + params.f3 + ' ' + params.f4 + '\n' +
+        'detune ' + detuneMix.toFixed(2).padStart(5);
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
