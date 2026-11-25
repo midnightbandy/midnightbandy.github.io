@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ripples — midnightbandy</title>
+<meta name="description" content="a hand-rolled ripple tank: circular wave pulses that spread, overlap and cancel. click to drop a stone, drag to trail a finger, c to still the water.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22black%22/><text x=%2250%22 y=%2268%22 font-size=%2252%22 text-anchor=%22middle%22 fill=%22%2300f0ff%22>≈</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'JetBrains Mono', monospace; cursor: crosshair; }
+
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  #vignette {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.65) 100%);
+  }
+
+  .hud {
+    position: fixed;
+    z-index: 5;
+    color: #bfefff;
+    text-shadow: 0 0 8px rgba(0,240,255,0.45);
+    user-select: none;
+    pointer-events: none;
+  }
+  .title { top: 28px; left: 28px; font-size: clamp(16px, 3vw, 22px); font-weight: 700; letter-spacing: -0.01em; }
+  .title span { color: #ff2ed1; text-shadow: 0 0 10px rgba(255,46,209,0.7); }
+  .desc { top: 60px; left: 29px; font-size: 11px; letter-spacing: 0.06em; color: #6c7a99; text-shadow: none; max-width: 46ch; }
+  .back { bottom: 28px; left: 28px; font-size: 11px; pointer-events: auto; }
+  .back a { color: #00f0ff; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+  .hint { bottom: 28px; right: 28px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #6c7a99; text-align: right; text-shadow: none; }
+  .params { top: 28px; right: 28px; font-size: 10px; letter-spacing: 0.04em; color: #45507a; text-align: right; text-shadow: none; white-space: pre; }
+  @media (max-width: 560px) { .hint { display: none; } .desc { max-width: 68vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="vignette"></div>
+
+<div class="hud title">ripple <span>//</span> tank</div>
+<div class="hud desc">circular wave pulses, hand-rolled: click to drop a stone, drag to trail a finger through the water, watch the rings overlap and cancel on their own.</div>
+<div class="hud back"><a href="../index.html">← midnightbandy</a></div>
+<div class="hud hint">click — drop · drag — trail · c — still the water</div>
+<div class="hud params" id="params"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const paramsEl = document.getElementById('params');
+
+  // ---------- diverging color LUT: magenta (trough) -> black (still) -> cyan -> mint (crest) ----------
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const stops = [
+    [0.00, hexToRgb('#ff2ed1')],
+    [0.25, hexToRgb('#28082c')],
+    [0.50, hexToRgb('#000000')],
+    [0.75, hexToRgb('#052a3a')],
+    [0.92, hexToRgb('#00f0ff')],
+    [1.00, hexToRgb('#eafff6')],
+  ];
+  const LUT = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let s0 = stops[0], s1 = stops[stops.length - 1];
+    for (let k = 0; k < stops.length - 1; k++) {
+      if (t >= stops[k][0] && t <= stops[k + 1][0]) { s0 = stops[k]; s1 = stops[k + 1]; break; }
+    }
+    const span = (s1[0] - s0[0]) || 1;
+    const lt = (t - s0[0]) / span;
+    for (let c = 0; c < 3; c++) LUT[i * 3 + c] = s0[1][c] + (s1[1][c] - s0[1][c]) * lt;
+  }
+
+  // ---------- buffer sized well below display res, upscaled with smoothing ----------
+  let W = 0, H = 0, buf = null, bctx = null, img = null;
+  let qualityScale = 1.0, appliedScale = 0;
+  let maxR = 100;
+
+  function buildBuffer() {
+    const baseW = Math.max(100, Math.min(220, Math.round(window.innerWidth / 5)));
+    const aspect = window.innerWidth / window.innerHeight;
+    W = Math.max(70, Math.round(baseW * qualityScale));
+    H = Math.max(50, Math.round((baseW / aspect) * qualityScale));
+    buf = document.createElement('canvas');
+    buf.width = W; buf.height = H;
+    bctx = buf.getContext('2d', { alpha: false });
+    img = bctx.createImageData(W, H);
+    for (let i = 3; i < img.data.length; i += 4) img.data[i] = 255;
+    maxR = Math.hypot(W, H);
+    appliedScale = qualityScale;
+  }
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    buildBuffer();
+  }
+
+  // ---------- drops: expanding, fading ring pulses ----------
+  const BASE_K = 0.9;       // spatial frequency inside a ring, buffer px^-1
+  const BASE_SPEED = 26;    // buffer px / second
+  const BASE_SIGMA = 3.2;   // ring thickness, buffer px
+  const MAX_DROPS = 22;
+  let drops = [];
+
+  function rand(min, max) { return min + Math.random() * (max - min); }
+
+  function addDrop(bx, by, amp) {
+    drops.push({
+      x: bx, y: by, t0: performance.now() / 1000,
+      amp, k: BASE_K * rand(0.85, 1.18), speed: BASE_SPEED * rand(0.9, 1.1),
+      sigma: BASE_SIGMA * rand(0.9, 1.25),
+    });
+    if (drops.length > MAX_DROPS) drops.shift();
+  }
+
+  function toBuffer(clientX, clientY) {
+    return [clientX / window.innerWidth * W, clientY / window.innerHeight * H];
+  }
+
+  // ---------- pointer interaction ----------
+  let pointerDown = false, lastTrailX = 0, lastTrailY = 0, lastDownAt = 0, lastDownX = 0, lastDownY = 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const now = performance.now();
+    const dist = Math.hypot(e.clientX - lastDownX, e.clientY - lastDownY);
+    if (now - lastDownAt < 320 && dist < 14) {
+      drops = []; // double-tap: still the water
+    } else {
+      const [bx, by] = toBuffer(e.clientX, e.clientY);
+      addDrop(bx, by, 1.0);
+      lastTrailX = bx; lastTrailY = by;
+    }
+    lastDownAt = now; lastDownX = e.clientX; lastDownY = e.clientY;
+    pointerDown = true;
+  });
+  window.addEventListener('pointerup', () => { pointerDown = false; });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointerDown) return;
+    const [bx, by] = toBuffer(e.clientX, e.clientY);
+    if (Math.hypot(bx - lastTrailX, by - lastTrailY) > 7) {
+      addDrop(bx, by, 0.45);
+      lastTrailX = bx; lastTrailY = by;
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'c' || e.key === 'C') drops = [];
+  });
+  window.addEventListener('resize', resize);
+  resize();
+
+  // seed a couple of drops so it's alive before anyone touches it
+  addDrop(W * 0.35, H * 0.4, 0.9);
+  addDrop(W * 0.68, H * 0.62, 0.8);
+
+  // ---------- ambient drops when idle ----------
+  let nextAmbientAt = performance.now() / 1000 + rand(1.2, 2.4);
+
+  // ---------- main loop ----------
+  let avgDt = 16;
+
+  function frame() {
+    const frameStart = performance.now();
+    const t = frameStart / 1000;
+
+    if (t > nextAmbientAt && drops.length < MAX_DROPS - 2) {
+      addDrop(rand(W * 0.1, W * 0.9), rand(H * 0.1, H * 0.9), rand(0.5, 0.85));
+      nextAmbientAt = t + rand(1.6, 3.2);
+    }
+
+    drops = drops.filter(d => (t - d.t0) * d.speed - 3 * d.sigma < maxR + d.sigma);
+
+    const data = img.data;
+    const n = drops.length;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let v = 0;
+        for (let i = 0; i < n; i++) {
+          const d = drops[i];
+          const dx = x - d.x, dy = y - d.y;
+          const r = Math.sqrt(dx * dx + dy * dy);
+          const age = t - d.t0;
+          const ringR = d.speed * age;
+          const diff = r - ringR;
+          if (diff > 3.2 * d.sigma || diff < -3.2 * d.sigma) continue;
+          const env = Math.exp(-(diff * diff) / (2 * d.sigma * d.sigma));
+          const wave = Math.sin(d.k * diff);
+          const spread = 1 / Math.sqrt(1 + r * 0.015);
+          const ageFade = Math.exp(-age * 0.1);
+          v += d.amp * env * wave * spread * ageFade;
+        }
+        const tt = Math.tanh(v * 1.7);
+        const idx = ((tt + 1) * 0.5 * 255) | 0;
+        const p = (y * W + x) * 4;
+        data[p] = LUT[idx * 3];
+        data[p + 1] = LUT[idx * 3 + 1];
+        data[p + 2] = LUT[idx * 3 + 2];
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(buf, 0, 0, W, H, 0, 0, canvas.width, canvas.height);
+
+    const dt = performance.now() - frameStart;
+    avgDt += (dt - avgDt) * 0.08;
+    if (avgDt > 30 && qualityScale > 0.45) qualityScale = Math.max(0.45, qualityScale * 0.93);
+    else if (avgDt < 14 && qualityScale < 1.0) qualityScale = Math.min(1.0, qualityScale * 1.03);
+    if (Math.abs(qualityScale - appliedScale) > 0.04) buildBuffer();
+
+    paramsEl.textContent =
+      'drops ' + String(drops.length).padStart(2) + '\n' +
+      'res   ' + W + 'x' + H + '\n' +
+      'ms    ' + avgDt.toFixed(1);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
